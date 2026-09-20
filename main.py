@@ -56,11 +56,6 @@ MS_DIFFICULTIES = {
     "h": {"size": 8, "mines": 15},
 }
 
-NUM_EMOJI = {
-    1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣",
-    5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣",
-}
-
 BOT_MS_LABEL = "🤖 ربات"
 
 MAIN_MENU_KB = InlineKeyboardMarkup([
@@ -69,7 +64,7 @@ MAIN_MENU_KB = InlineKeyboardMarkup([
         InlineKeyboardButton("🏀 بسکتبال", callback_data="menu_bb"),
         InlineKeyboardButton("⚽ فوتبال", callback_data="menu_fb"),
     ],
-    [InlineKeyboardButton("💣 مین روب", callback_data="menu_ms")],
+    [InlineKeyboardButton("💣 شکار مین", callback_data="menu_ms")],
     [InlineKeyboardButton("❌ خروج از بازی", callback_data="menu_exit")],
 ])
 
@@ -287,124 +282,9 @@ def build_fb_text(match):
     return text
 
 
-def ms_neighbors(r, c, size):
-    result = []
-    if r > 0:
-        result.append((r - 1, c))
-        if c > 0:
-            result.append((r - 1, c - 1))
-        if c < size - 1:
-            result.append((r - 1, c + 1))
-    if r < size - 1:
-        result.append((r + 1, c))
-        if c > 0:
-            result.append((r + 1, c - 1))
-        if c < size - 1:
-            result.append((r + 1, c + 1))
-    if c > 0:
-        result.append((r, c - 1))
-    if c < size - 1:
-        result.append((r, c + 1))
-    return result
-
-
-def ms_adj_mines(mines, r, c, size):
-    count = 0
-    for n in ms_neighbors(r, c, size):
-        if n in mines:
-            count += 1
-    return count
-
-
-def ms_generate_mines(size, count, exclude):
-    cells = []
-    for r in range(size):
-        for c in range(size):
-            if (r, c) != exclude:
-                cells.append((r, c))
+def ms_gen_mines(size, count):
+    cells = [(r, c) for r in range(size) for c in range(size)]
     return set(random.sample(cells, count))
-
-
-def ms_flood_reveal(revealed, mines, start, size):
-    stack = [start]
-    count = 0
-    while stack:
-        pos = stack.pop()
-        if pos in revealed:
-            continue
-        revealed.add(pos)
-        count += 1
-        r, c = pos
-        if ms_adj_mines(mines, r, c, size) == 0:
-            for nr, nc in ms_neighbors(r, c, size):
-                if (nr, nc) not in mines and (nr, nc) not in revealed:
-                    stack.append((nr, nc))
-    return count
-
-
-def ms_apply_move(match, user_id, pos):
-    if match["first_click"]:
-        match["mines"] = ms_generate_mines(
-            match["size"], match["mines_count"], pos
-        )
-        match["first_click"] = False
-
-    if pos in match["mines"]:
-        match["revealed"].add(pos)
-        match["status"] = "lost"
-        match["loser"] = user_id
-        if user_id == match["player1_id"]:
-            match["winner"] = match["player2_id"]
-        else:
-            match["winner"] = match["player1_id"]
-        match["updated_at"] = now_ts()
-        return "game_over"
-
-    count = ms_flood_reveal(
-        match["revealed"], match["mines"], pos, match["size"]
-    )
-
-    if user_id == match["player1_id"]:
-        match["p1_count"] += count
-    else:
-        match["p2_count"] += count
-
-    total_safe = match["size"] * match["size"] - match["mines_count"]
-    if len(match["revealed"]) >= total_safe:
-        match["status"] = "won"
-        if match["p1_count"] > match["p2_count"]:
-            match["winner"] = match["player1_id"]
-        elif match["p2_count"] > match["p1_count"]:
-            match["winner"] = match["player2_id"]
-        else:
-            match["winner"] = None
-        match["updated_at"] = now_ts()
-        return "game_over"
-
-    match["updated_at"] = now_ts()
-    return "continue"
-
-
-def ms_bot_move(match):
-    if match["status"] != "playing":
-        return "continue"
-
-    candidates = []
-    for r in range(match["size"]):
-        for c in range(match["size"]):
-            pos = (r, c)
-            if pos not in match["revealed"] and pos not in match["flagged"]:
-                candidates.append(pos)
-
-    if not candidates:
-        return "continue"
-
-    pos = random.choice(candidates)
-    result = ms_apply_move(match, "bot", pos)
-
-    if result == "game_over":
-        return "game_over"
-    return "continue"
 
 
 def ms_turn_name(match):
@@ -413,51 +293,79 @@ def ms_turn_name(match):
     return match["player2_name"]
 
 
+def ms_apply_click(match, user_id, pos):
+    if pos in match["found"] or pos in match["tested"]:
+        return "invalid"
+
+    if pos in match["mines"]:
+        match["found"].add(pos)
+        if user_id == match["player1_id"]:
+            match["p1_mines"] += 1
+        else:
+            match["p2_mines"] += 1
+        match["updated_at"] = now_ts()
+        if len(match["found"]) >= match["mines_count"]:
+            match["status"] = "won"
+            return "end"
+        return "mine"
+    else:
+        match["tested"].add(pos)
+        match["updated_at"] = now_ts()
+        return "empty"
+
+
+def ms_bot_move(match):
+    if match["status"] != "playing":
+        return "continue"
+
+    candidates = []
+    size = match["size"]
+    found = match["found"]
+    tested = match["tested"]
+    for r in range(size):
+        for c in range(size):
+            pos = (r, c)
+            if pos not in found and pos not in tested:
+                candidates.append(pos)
+
+    if not candidates:
+        return "continue"
+
+    pos = random.choice(candidates)
+    return ms_apply_click(match, "bot", pos)
+
+
 def ms_build_text(match):
     size = match["size"]
-    total_mines = match["mines_count"]
-    flags = len(match["flagged"])
-    status = match["status"]
+    total = match["mines_count"]
     vs_label = "با ربات" if match["vs"] == "bot" else "با کاربر"
+    p1 = match["player1_name"]
+    p2 = match["player2_name"] or "—"
+    status = match["status"]
 
     lines = [
-        f"💣 مین روب | {vs_label}",
-        f"📐 {size}x{size} | 💣 {total_mines}",
+        f"💣 شکار مین | {vs_label}",
+        f"📐 {size}x{size} | 💣 {total}",
+        "",
     ]
 
     if status == "waiting":
-        lines.append("")
-        lines.append(f"👤 {match['player1_name']} منتظر حریف است...")
+        lines.append(f"👤 {p1} منتظر حریف است...")
     elif status == "playing":
-        mode_label = "🔍 حفر" if match["mode"] == "dig" else "🚩 پرچم"
-        lines.append("")
         lines.append(f"🎯 نوبت: {ms_turn_name(match)}")
-        lines.append(f"🚩 {flags}/{total_mines} | {mode_label}")
+        lines.append("")
+        lines.append(f"👤 {p1}: 💣 {match['p1_mines']}")
+        lines.append(f"👤 {p2}: 💣 {match['p2_mines']}")
     elif status == "won":
+        lines.append(f"👤 {p1}: 💣 {match['p1_mines']}")
+        lines.append(f"👤 {p2}: 💣 {match['p2_mines']}")
         lines.append("")
-        lines.append("🎉 همه امن‌ها باز شد!")
-        if match["winner"] is None:
+        if match["p1_mines"] > match["p2_mines"]:
+            lines.append(f"🏆 برنده: {p1}")
+        elif match["p2_mines"] > match["p1_mines"]:
+            lines.append(f"🏆 برنده: {p2}")
+        else:
             lines.append("🤝 مساوی")
-        elif match["winner"] == match["player1_id"]:
-            lines.append(f"🏆 برنده: {match['player1_name']}")
-        else:
-            lines.append(f"🏆 برنده: {match['player2_name']}")
-    elif status == "lost":
-        lines.append("")
-        if match["loser"] == "bot":
-            lines.append("💥 ربات مین زد!")
-            lines.append(f"🏆 برنده: {match['player1_name']}")
-        else:
-            if match["loser"] == match["player1_id"]:
-                loser_name = match["player1_name"]
-            else:
-                loser_name = match["player2_name"]
-            if match["winner"] == match["player1_id"]:
-                winner_name = match["player1_name"]
-            else:
-                winner_name = match["player2_name"]
-            lines.append(f"💥 {loser_name} مین زد!")
-            lines.append(f"🏆 برنده: {winner_name}")
 
     return "\n".join(lines)
 
@@ -466,47 +374,34 @@ def ms_build_keyboard(match):
     size = match["size"]
     mid = match["match_id"]
     status = match["status"]
-    mode = match["mode"]
     mines = match["mines"]
-    revealed = match["revealed"]
-    flagged = match["flagged"]
+    found = match["found"]
+    tested = match["tested"]
     playing = status == "playing"
 
     rows = []
     for r in range(size):
-        row_btns = []
+        row = []
         for c in range(size):
             pos = (r, c)
-
-            if status == "lost" and pos in mines:
-                label = "💥" if pos in revealed else "💣"
+            if pos in found:
+                label = "💣"
                 cb = "ms|noop"
-            elif pos in revealed:
-                n = ms_adj_mines(mines, r, c, size)
-                label = "⬛" if n == 0 else NUM_EMOJI[n]
-                cb = "ms|noop"
-            elif pos in flagged:
-                label = "🚩"
-                cb = f"ms|u|{mid}|{r}|{c}" if playing else "ms|noop"
-            else:
+            elif pos in tested:
                 label = "⬜"
-                if not playing:
-                    cb = "ms|noop"
-                elif mode == "dig":
-                    cb = f"ms|d|{mid}|{r}|{c}"
-                else:
-                    cb = f"ms|f|{mid}|{r}|{c}"
-
-            row_btns.append(InlineKeyboardButton(label, callback_data=cb))
-        rows.append(row_btns)
+                cb = "ms|noop"
+            elif not playing and pos in mines:
+                label = "💣"
+                cb = "ms|noop"
+            else:
+                label = "❓"
+                cb = f"ms|x|{mid}|{r}|{c}" if playing else "ms|noop"
+            row.append(InlineKeyboardButton(label, callback_data=cb))
+        rows.append(row)
 
     if playing:
-        mode_label = "🔍 حالت: حفر" if mode == "dig" else "🚩 حالت: پرچم"
-        rows.append([
-            InlineKeyboardButton(mode_label, callback_data=f"ms|m|{mid}"),
-            InlineKeyboardButton("❌ پایان", callback_data=f"ms|e|{mid}"),
-        ])
-    elif status in ("won", "lost"):
+        rows.append([InlineKeyboardButton("❌ پایان", callback_data=f"ms|e|{mid}")])
+    else:
         rows.append([
             InlineKeyboardButton("🔄 بازی جدید", callback_data="menu_ms"),
             InlineKeyboardButton("❌ بستن", callback_data=f"ms|e|{mid}"),
@@ -962,7 +857,7 @@ async def handle_ms_vs(q, vs):
     vs_label = "با ربات" if vs == "bot" else "با کاربر"
     try:
         await q.edit_message_text(
-            f"💣 مین روب | {vs_label}\n\n"
+            f"💣 شکار مین | {vs_label}\n\n"
             f"سطح سختی رو انتخاب کن:",
             reply_markup=ms_diff_kb(vs),
         )
@@ -1011,16 +906,12 @@ async def handle_ms_diff(q, vs, level):
         "turn": user_id,
         "size": cfg["size"],
         "mines_count": cfg["mines"],
-        "mines": set(),
-        "revealed": set(),
-        "flagged": set(),
-        "first_click": True,
-        "mode": "dig",
+        "mines": ms_gen_mines(cfg["size"], cfg["mines"]),
+        "found": set(),
+        "tested": set(),
+        "p1_mines": 0,
+        "p2_mines": 0,
         "status": "waiting",
-        "winner": None,
-        "loser": None,
-        "p1_count": 0,
-        "p2_count": 0,
         "updated_at": now_ts(),
     }
 
@@ -1040,7 +931,7 @@ async def handle_ms_diff(q, vs, level):
             )
         else:
             await q.edit_message_text(
-                f"💣 مین روب | با کاربر\n"
+                f"💣 شکار مین | با کاربر\n"
                 f"📐 {cfg['size']}x{cfg['size']} | 💣 {cfg['mines']}\n\n"
                 f"👤 {session['username']} منتظر حریف است...\n\n"
                 f"هر کسی می‌خواد بازی کنه روی دکمه زیر بزنه:",
@@ -1104,7 +995,7 @@ async def handle_ms_cancel(q, mid):
         pass
 
 
-async def handle_ms_dig(q, mid, r, c):
+async def handle_ms_click(q, mid, r, c):
     match = ms_matches.get(mid)
     if not match or is_ms_expired(match):
         ms_matches.pop(mid, None)
@@ -1126,25 +1017,27 @@ async def handle_ms_dig(q, mid, r, c):
         return
 
     pos = (r, c)
-    if pos in match["revealed"] or pos in match["flagged"]:
+    result = ms_apply_click(match, user_id, pos)
+
+    if result == "invalid":
         await q.answer()
         return
 
-    result = ms_apply_move(match, user_id, pos)
-
-    if result == "game_over":
-        if match["status"] == "lost":
-            await q.answer("💥 مین زدی!")
-        else:
-            await q.answer("🎉 همه امن‌ها باز شد!")
+    if result == "end":
+        await q.answer("🎉 همه مین‌ها پیدا شد!")
         try:
             await q.edit_message_text(
                 ms_build_text(match),
                 reply_markup=ms_build_keyboard(match),
             )
         except Exception as e:
-            logging.exception("ms dig edit: %s", e)
+            logging.exception("ms end edit: %s", e)
         return
+
+    if result == "mine":
+        await q.answer("💣 مین پیدا کردی!")
+    else:
+        await q.answer("❌ خالی بود")
 
     if match["vs"] == "user":
         if user_id == match["player1_id"]:
@@ -1152,35 +1045,31 @@ async def handle_ms_dig(q, mid, r, c):
         else:
             match["turn"] = match["player1_id"]
         match["updated_at"] = now_ts()
-        await q.answer()
         try:
             await q.edit_message_text(
                 ms_build_text(match),
                 reply_markup=ms_build_keyboard(match),
             )
         except Exception as e:
-            logging.exception("ms dig edit: %s", e)
+            logging.exception("ms user edit: %s", e)
         return
 
     bot_result = ms_bot_move(match)
 
-    if bot_result == "game_over":
-        if match["status"] == "lost":
-            toast = "💥 ربات مین زد! بردی!"
-        else:
-            toast = "🎉 همه امن‌ها باز شد!"
+    if bot_result == "end":
         match["turn"] = match["player1_id"]
-    else:
-        match["turn"] = match["player1_id"]
-        toast = None
+        match["updated_at"] = now_ts()
+        try:
+            await q.edit_message_text(
+                ms_build_text(match),
+                reply_markup=ms_build_keyboard(match),
+            )
+        except Exception as e:
+            logging.exception("ms bot end edit: %s", e)
+        return
 
+    match["turn"] = match["player1_id"]
     match["updated_at"] = now_ts()
-
-    if toast:
-        await q.answer(toast)
-    else:
-        await q.answer()
-
     try:
         await q.edit_message_text(
             ms_build_text(match),
@@ -1188,121 +1077,6 @@ async def handle_ms_dig(q, mid, r, c):
         )
     except Exception as e:
         logging.exception("ms bot edit: %s", e)
-
-
-async def handle_ms_flag(q, mid, r, c):
-    match = ms_matches.get(mid)
-    if not match or is_ms_expired(match):
-        ms_matches.pop(mid, None)
-        await q.answer("این بازی منقضی شده.", show_alert=True)
-        return
-
-    if match["status"] != "playing":
-        await q.answer()
-        return
-
-    user_id = q.from_user.id
-
-    if user_id != match["player1_id"] and user_id != match["player2_id"]:
-        await q.answer("شما در این بازی نیستید.", show_alert=True)
-        return
-
-    if user_id != match["turn"]:
-        await q.answer(f"نوبت {ms_turn_name(match)} است.", show_alert=True)
-        return
-
-    pos = (r, c)
-    if pos in match["revealed"]:
-        await q.answer()
-        return
-
-    if pos in match["flagged"]:
-        await q.answer("این سلول قبلاً پرچم داره.", show_alert=True)
-        return
-
-    if len(match["flagged"]) >= match["mines_count"]:
-        await q.answer(
-            f"تعداد پرچم‌ها به حداکثر ({match['mines_count']}) رسیده.",
-            show_alert=True,
-        )
-        return
-
-    match["flagged"].add(pos)
-    match["updated_at"] = now_ts()
-    await q.answer("🚩 پرچم گذاشته شد.")
-
-    try:
-        await q.edit_message_text(
-            ms_build_text(match),
-            reply_markup=ms_build_keyboard(match),
-        )
-    except Exception as e:
-        logging.exception("ms flag edit: %s", e)
-
-
-async def handle_ms_unflag(q, mid, r, c):
-    match = ms_matches.get(mid)
-    if not match or is_ms_expired(match):
-        ms_matches.pop(mid, None)
-        await q.answer("این بازی منقضی شده.", show_alert=True)
-        return
-
-    if match["status"] != "playing":
-        await q.answer()
-        return
-
-    user_id = q.from_user.id
-
-    if user_id != match["turn"]:
-        await q.answer(f"نوبت {ms_turn_name(match)} است.", show_alert=True)
-        return
-
-    pos = (r, c)
-    if pos not in match["flagged"]:
-        await q.answer()
-        return
-
-    match["flagged"].discard(pos)
-    match["updated_at"] = now_ts()
-    await q.answer("پرچم برداشته شد.")
-
-    try:
-        await q.edit_message_text(
-            ms_build_text(match),
-            reply_markup=ms_build_keyboard(match),
-        )
-    except Exception as e:
-        logging.exception("ms unflag edit: %s", e)
-
-
-async def handle_ms_toggle_mode(q, mid):
-    match = ms_matches.get(mid)
-    if not match or is_ms_expired(match):
-        ms_matches.pop(mid, None)
-        await q.answer("این بازی منقضی شده.", show_alert=True)
-        return
-
-    if match["status"] != "playing":
-        await q.answer()
-        return
-
-    user_id = q.from_user.id
-
-    if user_id != match["turn"]:
-        await q.answer(f"نوبت {ms_turn_name(match)} است.", show_alert=True)
-        return
-
-    match["mode"] = "flag" if match["mode"] == "dig" else "dig"
-    match["updated_at"] = now_ts()
-    await q.answer("🚩 حالت پرچم" if match["mode"] == "flag" else "🔍 حالت حفر")
-
-    try:
-        await q.edit_message_text(
-            ms_build_text(match),
-            reply_markup=ms_build_keyboard(match),
-        )
-    except Exception as e:
-        logging.exception("ms mode edit: %s", e)
 
 
 async def handle_ms_end(q, mid):
@@ -1373,22 +1147,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if sub == "noop":
                 await q.answer()
                 return
-            if sub in ("d", "f", "u") and len(parts) >= 5:
+            if sub == "x" and len(parts) >= 5:
                 try:
                     r = int(parts[3])
                     c = int(parts[4])
                 except ValueError:
                     await q.answer("دکمه نامعتبر.", show_alert=True)
                     return
-                if sub == "d":
-                    await handle_ms_dig(q, parts[2], r, c)
-                elif sub == "f":
-                    await handle_ms_flag(q, parts[2], r, c)
-                else:
-                    await handle_ms_unflag(q, parts[2], r, c)
-                return
-            if sub == "m" and len(parts) >= 3:
-                await handle_ms_toggle_mode(q, parts[2])
+                await handle_ms_click(q, parts[2], r, c)
                 return
             if sub == "e" and len(parts) >= 3:
                 await handle_ms_end(q, parts[2])
@@ -1827,7 +1593,7 @@ async def handle_session_callback(q, chat_id, user_id, message_id, data):
 
     elif data == "menu_ms":
         await q.edit_message_text(
-            "💣 مین روب\n\n"
+            "💣 شکار مین\n\n"
             "با کی می‌خوای بازی کنی؟",
             reply_markup=MS_VS_KB,
         )
@@ -2148,7 +1914,7 @@ async def cleanup_task():
                     await app_telegram.bot.edit_message_text(
                         chat_id=match["chat_id"],
                         message_id=match["message_id"],
-                        text="⏰ بازی مین روب به دلیل عدم فعالیت بسته شد.\n"
+                        text="⏰ بازی شکار مین به دلیل عدم فعالیت بسته شد.\n"
                              "برای شروع دوباره بنویسید: شروع بازی",
                         reply_markup=None,
                     )
