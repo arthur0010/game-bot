@@ -23,19 +23,18 @@ RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 SESSION_TIMEOUT = 1800
 CLEANUP_INTERVAL = 60
 TRIGGER_TEXT = "شروع بازی"
-
 BASKETBALL_EMOJI = "🏀"
-BASKETBALL_PROBABILITY = 0.5
 
 sessions = {}
 matches = {}
 bb_matches = {}
+bb_index = {}
 
 app_telegram = None
 main_loop = None
 
 RPS_NAMES = {"r": "🪨 سنگ", "p": "📄 کاغذ", "s": "✂️ قیچی"}
-WINNING_MOVES = {("r", "s"), ("p", "r"), ("s", "p")}
+WINNING_MOVES = frozenset([("r", "s"), ("p", "r"), ("s", "p")])
 RPS_CHOICES = ("r", "p", "s")
 
 MAIN_MENU_KB = InlineKeyboardMarkup([
@@ -143,22 +142,20 @@ def build_bb_text(match):
     p1 = match["player1_name"]
     p2 = match["player2_name"]
     total = match["throws_count"]
-    t1 = len(match["p1_throws"])
-    t2 = len(match["p2_throws"])
 
     text = (
         f"🏀 بسکتبال | تعداد پرتاب: {total}\n\n"
         f"👤 {p1}: {throws_display(match['p1_throws'])}\n"
-        f"   گل: {match['score1']} از {t1}\n\n"
+        f"   گل: {match['score1']} از {len(match['p1_throws'])}\n\n"
         f"👤 {p2}: {throws_display(match['p2_throws'])}\n"
-        f"   گل: {match['score2']} از {t2}\n"
+        f"   گل: {match['score2']} از {len(match['p2_throws'])}\n"
     )
 
     last_shot = match.get("last_shot")
     if last_shot:
         text += f"\n━━━━━━━━━━━\n{last_shot}\n━━━━━━━━━━━\n"
 
-    text += "\nبرای پرتاب، روی همین پیام ریپلای کنید و 🏀 بفرستید"
+    text += "\n🏀 برای پرتاب، روی همین پیام ریپلای کنید و ایموجی بسکتبال بفرستید"
     return text
 
 
@@ -228,10 +225,20 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_basketball_shot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg or not msg.text:
+    if not msg:
         return
-    if msg.text.strip() != BASKETBALL_EMOJI:
+
+    scored_override = None
+    is_dice = False
+
+    if msg.dice and msg.dice.emoji == BASKETBALL_EMOJI:
+        is_dice = True
+        scored_override = msg.dice.value >= 4
+    elif msg.text and msg.text.strip() == BASKETBALL_EMOJI:
+        is_dice = False
+    else:
         return
+
     if not msg.reply_to_message:
         return
 
@@ -243,31 +250,28 @@ async def on_basketball_shot(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     reply_to_id = msg.reply_to_message.message_id
 
-    match = None
-    for m in bb_matches.values():
-        if m["chat_id"] != chat_id:
-            continue
-        if m["message_id"] != reply_to_id:
-            continue
-        if m["status"] != "playing":
-            continue
-        match = m
-        break
+    mid = bb_index.get((chat_id, reply_to_id))
+    if not mid:
+        return
 
-    if not match:
+    match = bb_matches.get(mid)
+    if not match or match["status"] != "playing":
         return
 
     if is_expired(match):
-        bb_matches.pop(match["match_id"], None)
+        bb_matches.pop(mid, None)
+        bb_index.pop((chat_id, reply_to_id), None)
         return
 
     if user_id != match["player1_id"] and user_id != match["player2_id"]:
         return
 
-    await process_basketball_shot(context, match, user_id)
+    await process_basketball_shot(
+        context, match, user_id, scored_override, msg.message_id
+    )
 
 
-async def process_basketball_shot(context, match, user_id):
+async def process_basketball_shot(context, match, user_id, scored_override, shot_message_id):
     is_p1 = user_id == match["player1_id"]
     throws = match["p1_throws"] if is_p1 else match["p2_throws"]
     name = match["player1_name"] if is_p1 else match["player2_name"]
@@ -277,14 +281,18 @@ async def process_basketball_shot(context, match, user_id):
         try:
             await context.bot.send_message(
                 chat_id=match["chat_id"],
-                text=f"⚠️ {name} تعداد پرتاب‌های تعیین شده رو کامل کرده!",
-                reply_to_message_id=match["message_id"],
+                text=f"⚠️ {name} تعداد پرتاب‌های تعیین شده ({total}) رو کامل کرده!",
+                reply_to_message_id=shot_message_id,
             )
         except Exception:
             pass
         return
 
-    scored = random.random() < BASKETBALL_PROBABILITY
+    if scored_override is None:
+        scored = random.random() < 0.5
+    else:
+        scored = scored_override
+
     throws.append(scored)
     shot_num = len(throws)
 
@@ -323,6 +331,7 @@ async def process_basketball_shot(context, match, user_id):
         )
 
         bb_matches.pop(match["match_id"], None)
+        bb_index.pop((match["chat_id"], match["message_id"]), None)
 
         try:
             await context.bot.edit_message_text(
@@ -466,6 +475,7 @@ async def handle_bb_throws(q, throws_str):
         "status": "waiting",
         "updated_at": now_ts(),
     }
+    bb_index[(chat_id, message_id)] = mid
     sessions.pop(key, None)
     await q.edit_message_text(
         f"🏀 بسکتبال | تعداد پرتاب: {throws_count}\n\n"
@@ -479,6 +489,7 @@ async def handle_bb_join(q, mid):
     match = bb_matches.get(mid)
     if not match or is_expired(match):
         bb_matches.pop(mid, None)
+        bb_index.pop((q.message.chat.id, q.message.message_id), None)
         await q.answer("این بازی منقضی شده.", show_alert=True)
         return
 
@@ -518,6 +529,7 @@ async def handle_bb_cancel(q, mid):
         return
 
     bb_matches.pop(mid, None)
+    bb_index.pop((match["chat_id"], match["message_id"]), None)
     await q.answer()
     try:
         await q.edit_message_text(
@@ -550,6 +562,7 @@ async def handle_bb_end(q, mid):
         final = "🤝 بازی مساوی تمام شد!"
 
     bb_matches.pop(mid, None)
+    bb_index.pop((match["chat_id"], match["message_id"]), None)
     await q.answer()
     try:
         await q.edit_message_text(
@@ -886,6 +899,7 @@ async def cleanup_task():
                 match = bb_matches.pop(mid, None)
                 if not match:
                     continue
+                bb_index.pop((match["chat_id"], match["message_id"]), None)
                 try:
                     await app_telegram.bot.edit_message_text(
                         chat_id=match["chat_id"],
@@ -999,16 +1013,18 @@ async def main_async():
         .build()
     )
 
+    bb_shot_filter = (
+        filters.Dice.BASKETBALL
+        | (filters.TEXT & ~filters.COMMAND & filters.Regex(r'^🏀$'))
+    )
+
     app_telegram.add_handler(CommandHandler("start", on_start))
     app_telegram.add_handler(CallbackQueryHandler(on_callback))
     app_telegram.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.Regex(r'شروع بازی'),
         on_group_message
     ))
-    app_telegram.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex(r'🏀'),
-        on_basketball_shot
-    ))
+    app_telegram.add_handler(MessageHandler(bb_shot_filter, on_basketball_shot))
 
     await app_telegram.initialize()
     await app_telegram.start()
