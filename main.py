@@ -26,7 +26,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 SESSION_TIMEOUT = 1800
-MS_TIMEOUT = 3600
+MS_TIMEOUT = 10800
 RIDDLE_TTL = 86400
 CLEANUP_INTERVAL = 60
 TRIGGER_TEXT = "شروع بازی"
@@ -404,7 +404,7 @@ def ms_build_keyboard(match):
         rows.append([InlineKeyboardButton("❌ پایان", callback_data=f"ms|e|{mid}")])
     else:
         rows.append([
-            InlineKeyboardButton("🔄 بازی جدید", callback_data="menu_ms"),
+            InlineKeyboardButton("🔄 بازی جدید", callback_data=f"ms|new|{mid}"),
             InlineKeyboardButton("❌ بستن", callback_data=f"ms|e|{mid}"),
         ])
 
@@ -922,7 +922,6 @@ async def handle_ms_diff(q, vs, level):
         match["status"] = "playing"
 
     ms_matches[mid] = match
-    sessions.pop(key, None)
 
     try:
         if vs == "bot":
@@ -1058,6 +1057,36 @@ async def handle_ms_click(q, mid, r, c):
         logging.exception("ms edit: %s", e)
 
 
+async def handle_ms_new(q, mid):
+    chat_id = q.message.chat.id
+    user_id = q.from_user.id
+    message_id = q.message.message_id
+    key = (chat_id, user_id)
+
+    session = sessions.get(key)
+    if not session or session["message_id"] != message_id:
+        sessions[key] = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "username": user_display(q.from_user),
+            "message_id": message_id,
+            "bot_last_round": None,
+            "updated_at": now_ts(),
+        }
+    else:
+        session["updated_at"] = now_ts()
+
+    await q.answer()
+    try:
+        await q.edit_message_text(
+            "💣 شکار مین\n\n"
+            "با کی می‌خوای بازی کنی؟",
+            reply_markup=MS_VS_KB,
+        )
+    except Exception as e:
+        logging.exception("ms new edit: %s", e)
+
+
 async def handle_ms_end(q, mid):
     match = ms_matches.get(mid)
     if not match:
@@ -1134,6 +1163,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await q.answer("دکمه نامعتبر.", show_alert=True)
                     return
                 await handle_ms_click(q, parts[2], r, c)
+                return
+            if sub == "new" and len(parts) >= 3:
+                await handle_ms_new(q, parts[2])
                 return
             if sub == "e" and len(parts) >= 3:
                 await handle_ms_end(q, parts[2])
