@@ -75,12 +75,6 @@ def rps_pick_kb(mid):
             InlineKeyboardButton("📄 کاغذ", callback_data=f"rps_pick|p|{mid}"),
             InlineKeyboardButton("✂️ قیچی", callback_data=f"rps_pick|s|{mid}"),
         ],
-    ])
-
-
-def rps_result_kb(mid):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔁 دست بعدی", callback_data=f"rps_next|{mid}")],
         [InlineKeyboardButton("❌ پایان بازی", callback_data=f"rps_end|{mid}")],
     ])
 
@@ -112,11 +106,25 @@ def build_match_text(match):
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == "private":
-        await update.message.reply_text(
-            "این ربات برای بازی در گروه‌ها طراحی شده.\n"
-            "من رو به یک گروه اضافه کن و اونجا بنویس: شروع بازی"
-        )
+    if update.effective_chat.type != "private":
+        return
+
+    me = await context.bot.get_me()
+    add_url = f"https://t.me/{me.username}?startgroup=new"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ افزودن به گروه", url=add_url)],
+    ])
+
+    await update.message.reply_text(
+        "🎮 سلام!\n\n"
+        "من یک ربات بازی و سرگرمی برای گروه‌ها هستم.\n\n"
+        "برای شروع، من رو به گروهت اضافه کن و اونجا بنویس:\n"
+        "شروع بازی\n\n"
+        "🎲 بازی‌های موجود:\n"
+        "✂️ سنگ کاغذ قیچی (با ربات / با کاربر)",
+        reply_markup=kb,
+    )
 
 
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,9 +186,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "rps_pick":
             await handle_rps_pick(q, parts[2], parts[1])
             return
-        if action == "rps_next":
-            await handle_rps_next(q, parts[1])
-            return
         if action == "rps_end":
             await handle_rps_end(q, parts[1])
             return
@@ -202,10 +207,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_botpick(q, choice):
     chat_id = q.message.chat.id
     user_id = q.from_user.id
+    message_id = q.message.message_id
     key = (chat_id, user_id)
     session = sessions.get(key)
 
-    if not session:
+    if not session or session["message_id"] != message_id:
         await q.answer(
             "این بازی برای شما نیست یا منقضی شده.\n"
             "لطفاً خودتان بنویسید: شروع بازی",
@@ -433,54 +439,32 @@ async def show_match_result(q, match):
         match["score2"] += 1
         result_line = f"🏆 برنده این دست: {match['player2_name']}"
 
-    match["status"] = "round_finished"
-    match["updated_at"] = now_ts()
-
-    try:
-        await q.edit_message_text(
-            f"✂️ نتیجه این دست\n\n"
-            f"👤 {match['player1_name']}: {RPS_NAMES[c1]}\n"
-            f"👤 {match['player2_name']}: {RPS_NAMES[c2]}\n\n"
-            f"{result_line}\n\n"
-            f"📊 امتیاز کل:\n"
-            f"{match['player1_name']}: {match['score1']}\n"
-            f"{match['player2_name']}: {match['score2']}",
-            reply_markup=rps_result_kb(match["match_id"]),
-        )
-    except Exception as e:
-        logging.exception("show result: %s", e)
-
-
-async def handle_rps_next(q, mid):
-    match = matches.get(mid)
-    if not match or is_expired(match):
-        matches.pop(mid, None)
-        await q.answer("این بازی منقضی شده.", show_alert=True)
-        return
-
-    user_id = q.from_user.id
-    if user_id != match["player1_id"] and user_id != match["player2_id"]:
-        await q.answer("شما در این بازی نیستید.", show_alert=True)
-        return
-
-    if match["status"] != "round_finished":
-        await q.answer("الان نمی‌تونید دست جدید شروع کنید.", show_alert=True)
-        return
+    result_text = (
+        f"✂️ نتیجه این دست\n\n"
+        f"👤 {match['player1_name']}: {RPS_NAMES[c1]}\n"
+        f"👤 {match['player2_name']}: {RPS_NAMES[c2]}\n\n"
+        f"{result_line}\n\n"
+        f"📊 امتیاز کل:\n"
+        f"{match['player1_name']}: {match['score1']}\n"
+        f"{match['player2_name']}: {match['score2']}"
+    )
 
     match["p1_choice"] = None
     match["p2_choice"] = None
-    match["status"] = "playing"
     match["updated_at"] = now_ts()
 
-    await q.answer("🎮 دست جدید شروع شد!")
+    try:
+        await q.message.reply_text(result_text)
+    except Exception as e:
+        logging.exception("send result: %s", e)
 
     try:
         await q.edit_message_text(
             build_match_text(match),
-            reply_markup=rps_pick_kb(mid),
+            reply_markup=rps_pick_kb(match["match_id"]),
         )
     except Exception as e:
-        logging.exception("edit next: %s", e)
+        logging.exception("edit next round: %s", e)
 
 
 async def handle_rps_end(q, mid):
