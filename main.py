@@ -294,6 +294,8 @@ def ms_turn_name(match):
 
 
 def ms_apply_click(match, user_id, pos):
+    if match["status"] != "playing":
+        return "invalid"
     if pos in match["found"] or pos in match["tested"]:
         return "invalid"
 
@@ -308,20 +310,20 @@ def ms_apply_click(match, user_id, pos):
             match["status"] = "won"
             return "end"
         return "mine"
-    else:
-        match["tested"].add(pos)
-        match["updated_at"] = now_ts()
-        return "empty"
+
+    match["tested"].add(pos)
+    match["updated_at"] = now_ts()
+    return "empty"
 
 
 def ms_bot_move(match):
     if match["status"] != "playing":
         return "continue"
 
-    candidates = []
     size = match["size"]
     found = match["found"]
     tested = match["tested"]
+    candidates = []
     for r in range(size):
         for c in range(size):
             pos = (r, c)
@@ -331,13 +333,13 @@ def ms_bot_move(match):
     if not candidates:
         return "continue"
 
-    pos = random.choice(candidates)
-    return ms_apply_click(match, "bot", pos)
+    return ms_apply_click(match, "bot", random.choice(candidates))
 
 
 def ms_build_text(match):
     size = match["size"]
     total = match["mines_count"]
+    found_count = len(match["found"])
     vs_label = "با ربات" if match["vs"] == "bot" else "با کاربر"
     p1 = match["player1_name"]
     p2 = match["player2_name"] or "—"
@@ -345,7 +347,7 @@ def ms_build_text(match):
 
     lines = [
         f"💣 شکار مین | {vs_label}",
-        f"📐 {size}x{size} | 💣 {total}",
+        f"📐 {size}x{size} | 💣 {found_count}/{total}",
         "",
     ]
 
@@ -374,7 +376,6 @@ def ms_build_keyboard(match):
     size = match["size"]
     mid = match["match_id"]
     status = match["status"]
-    mines = match["mines"]
     found = match["found"]
     tested = match["tested"]
     playing = status == "playing"
@@ -390,12 +391,12 @@ def ms_build_keyboard(match):
             elif pos in tested:
                 label = "⬜"
                 cb = "ms|noop"
-            elif not playing and pos in mines:
-                label = "💣"
-                cb = "ms|noop"
+            elif playing:
+                label = "❓"
+                cb = f"ms|x|{mid}|{r}|{c}"
             else:
                 label = "❓"
-                cb = f"ms|x|{mid}|{r}|{c}" if playing else "ms|noop"
+                cb = "ms|noop"
             row.append(InlineKeyboardButton(label, callback_data=cb))
         rows.append(row)
 
@@ -1016,15 +1017,18 @@ async def handle_ms_click(q, mid, r, c):
         await q.answer(f"نوبت {ms_turn_name(match)} است.", show_alert=True)
         return
 
-    pos = (r, c)
-    result = ms_apply_click(match, user_id, pos)
+    result = ms_apply_click(match, user_id, (r, c))
 
     if result == "invalid":
         await q.answer()
         return
 
-    if result == "end":
-        await q.answer("🎉 همه مین‌ها پیدا شد!")
+    if result == "mine":
+        await q.answer("💣 مین پیدا کردی!")
+    elif result == "empty":
+        await q.answer("❌ خالی بود")
+    elif result == "end":
+        await q.answer("🎉 آخرین مین پیدا شد!")
         try:
             await q.edit_message_text(
                 ms_build_text(match),
@@ -1034,49 +1038,24 @@ async def handle_ms_click(q, mid, r, c):
             logging.exception("ms end edit: %s", e)
         return
 
-    if result == "mine":
-        await q.answer("💣 مین پیدا کردی!")
-    else:
-        await q.answer("❌ خالی بود")
-
     if match["vs"] == "user":
         if user_id == match["player1_id"]:
             match["turn"] = match["player2_id"]
         else:
             match["turn"] = match["player1_id"]
-        match["updated_at"] = now_ts()
-        try:
-            await q.edit_message_text(
-                ms_build_text(match),
-                reply_markup=ms_build_keyboard(match),
-            )
-        except Exception as e:
-            logging.exception("ms user edit: %s", e)
-        return
-
-    bot_result = ms_bot_move(match)
-
-    if bot_result == "end":
+    else:
+        ms_bot_move(match)
         match["turn"] = match["player1_id"]
-        match["updated_at"] = now_ts()
-        try:
-            await q.edit_message_text(
-                ms_build_text(match),
-                reply_markup=ms_build_keyboard(match),
-            )
-        except Exception as e:
-            logging.exception("ms bot end edit: %s", e)
-        return
 
-    match["turn"] = match["player1_id"]
     match["updated_at"] = now_ts()
+
     try:
         await q.edit_message_text(
             ms_build_text(match),
             reply_markup=ms_build_keyboard(match),
         )
     except Exception as e:
-        logging.exception("ms bot edit: %s", e)
+        logging.exception("ms edit: %s", e)
 
 
 async def handle_ms_end(q, mid):
