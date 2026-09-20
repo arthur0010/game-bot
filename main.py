@@ -24,8 +24,12 @@ SESSION_TIMEOUT = 1800
 CLEANUP_INTERVAL = 60
 TRIGGER_TEXT = "شروع بازی"
 
+BASKETBALL_EMOJI = "🏀"
+BASKETBALL_PROBABILITY = 0.5
+
 sessions = {}
 matches = {}
+bb_matches = {}
 
 app_telegram = None
 main_loop = None
@@ -36,6 +40,7 @@ RPS_CHOICES = ("r", "p", "s")
 
 MAIN_MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("✂️ سنگ کاغذ قیچی", callback_data="menu_rps")],
+    [InlineKeyboardButton("🏀 بسکتبال", callback_data="menu_bb")],
     [InlineKeyboardButton("❌ خروج از بازی", callback_data="menu_exit")],
 ])
 
@@ -52,6 +57,15 @@ RPS_PICK_BOT_KB = InlineKeyboardMarkup([
         InlineKeyboardButton("✂️ قیچی", callback_data="rps_botpick|s"),
     ],
     [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_rps")],
+])
+
+BB_THROWS_KB = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("1 پرتاب", callback_data="bb_throws|1"),
+        InlineKeyboardButton("2 پرتاب", callback_data="bb_throws|2"),
+        InlineKeyboardButton("3 پرتاب", callback_data="bb_throws|3"),
+    ],
+    [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back")],
 ])
 
 
@@ -73,6 +87,19 @@ def rps_pick_kb(mid):
     ])
 
 
+def bb_join_kb(mid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✋ من می‌خوام بازی کنم", callback_data=f"bb_join|{mid}")],
+        [InlineKeyboardButton("❌ لغو", callback_data=f"bb_cancel|{mid}")],
+    ])
+
+
+def bb_play_kb(mid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ پایان بازی", callback_data=f"bb_end|{mid}")],
+    ])
+
+
 def now_ts():
     return time.time()
 
@@ -83,6 +110,12 @@ def user_display(user):
 
 def is_expired(item):
     return (now_ts() - item["updated_at"]) > SESSION_TIMEOUT
+
+
+def throws_display(throws):
+    if not throws:
+        return "—"
+    return " ".join("🎯" if t else "❌" for t in throws)
 
 
 def build_match_text(match):
@@ -103,6 +136,29 @@ def build_match_text(match):
         text += f"\n{last_round}\n"
 
     text += "\nهر دو نفر انتخاب کنید:"
+    return text
+
+
+def build_bb_text(match):
+    p1 = match["player1_name"]
+    p2 = match["player2_name"]
+    total = match["throws_count"]
+    t1 = len(match["p1_throws"])
+    t2 = len(match["p2_throws"])
+
+    text = (
+        f"🏀 بسکتبال | تعداد پرتاب: {total}\n\n"
+        f"👤 {p1}: {throws_display(match['p1_throws'])}\n"
+        f"   گل: {match['score1']} از {t1}\n\n"
+        f"👤 {p2}: {throws_display(match['p2_throws'])}\n"
+        f"   گل: {match['score2']} از {t2}\n"
+    )
+
+    last_shot = match.get("last_shot")
+    if last_shot:
+        text += f"\n━━━━━━━━━━━\n{last_shot}\n━━━━━━━━━━━\n"
+
+    text += "\nبرای پرتاب، روی همین پیام ریپلای کنید و 🏀 بفرستید"
     return text
 
 
@@ -170,6 +226,126 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
 
+async def on_basketball_shot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    if msg.text.strip() != BASKETBALL_EMOJI:
+        return
+    if not msg.reply_to_message:
+        return
+
+    chat_type = update.effective_chat.type
+    if chat_type != "group" and chat_type != "supergroup":
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    reply_to_id = msg.reply_to_message.message_id
+
+    match = None
+    for m in bb_matches.values():
+        if m["chat_id"] != chat_id:
+            continue
+        if m["message_id"] != reply_to_id:
+            continue
+        if m["status"] != "playing":
+            continue
+        match = m
+        break
+
+    if not match:
+        return
+
+    if is_expired(match):
+        bb_matches.pop(match["match_id"], None)
+        return
+
+    if user_id != match["player1_id"] and user_id != match["player2_id"]:
+        return
+
+    await process_basketball_shot(context, match, user_id)
+
+
+async def process_basketball_shot(context, match, user_id):
+    is_p1 = user_id == match["player1_id"]
+    throws = match["p1_throws"] if is_p1 else match["p2_throws"]
+    name = match["player1_name"] if is_p1 else match["player2_name"]
+    total = match["throws_count"]
+
+    if len(throws) >= total:
+        try:
+            await context.bot.send_message(
+                chat_id=match["chat_id"],
+                text=f"⚠️ {name} تعداد پرتاب‌های تعیین شده رو کامل کرده!",
+                reply_to_message_id=match["message_id"],
+            )
+        except Exception:
+            pass
+        return
+
+    scored = random.random() < BASKETBALL_PROBABILITY
+    throws.append(scored)
+    shot_num = len(throws)
+
+    if scored:
+        if is_p1:
+            match["score1"] += 1
+        else:
+            match["score2"] += 1
+        last_shot = f"🏀 {name} پرتاب {shot_num}/{total}: گل! 🎯"
+    else:
+        last_shot = f"❌ {name} پرتاب {shot_num}/{total}: خطا"
+
+    match["last_shot"] = last_shot
+    match["updated_at"] = now_ts()
+
+    p1_done = len(match["p1_throws"]) >= total
+    p2_done = len(match["p2_throws"]) >= total
+
+    if p1_done and p2_done:
+        if match["score1"] > match["score2"]:
+            winner_text = f"🏆 برنده: {match['player1_name']}"
+        elif match["score2"] > match["score1"]:
+            winner_text = f"🏆 برنده: {match['player2_name']}"
+        else:
+            winner_text = "🤝 مساوی!"
+
+        text = (
+            f"🏀 پایان بازی بسکتبال\n\n"
+            f"👤 {match['player1_name']}: {throws_display(match['p1_throws'])}\n"
+            f"   گل: {match['score1']} از {total}\n\n"
+            f"👤 {match['player2_name']}: {throws_display(match['p2_throws'])}\n"
+            f"   گل: {match['score2']} از {total}\n\n"
+            f"━━━━━━━━━━━\n{last_shot}\n━━━━━━━━━━━\n\n"
+            f"{winner_text}\n\n"
+            f"برای شروع دوباره بنویسید: شروع بازی"
+        )
+
+        bb_matches.pop(match["match_id"], None)
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=match["chat_id"],
+                message_id=match["message_id"],
+                text=text,
+                reply_markup=None,
+            )
+        except Exception as e:
+            logging.exception("bb final edit: %s", e)
+        return
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=match["chat_id"],
+            message_id=match["message_id"],
+            text=build_bb_text(match),
+            reply_markup=bb_play_kb(match["match_id"]),
+        )
+    except Exception as e:
+        logging.exception("bb edit: %s", e)
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
@@ -191,6 +367,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if action == "rps_botpick":
             await handle_botpick(q, parts[1])
+            return
+        if action == "bb_throws":
+            await handle_bb_throws(q, parts[1])
+            return
+        if action == "bb_join":
+            await handle_bb_join(q, parts[1])
+            return
+        if action == "bb_cancel":
+            await handle_bb_cancel(q, parts[1])
+            return
+        if action == "bb_end":
+            await handle_bb_end(q, parts[1])
             return
 
         await handle_session_callback(
@@ -229,6 +417,155 @@ async def handle_botpick(q, choice):
     await play_with_bot(q, session, choice)
 
 
+async def handle_bb_throws(q, throws_str):
+    chat_id = q.message.chat.id
+    user_id = q.from_user.id
+    message_id = q.message.message_id
+    key = (chat_id, user_id)
+    session = sessions.get(key)
+
+    if not session or session["message_id"] != message_id:
+        await q.answer(
+            "این بازی برای شما نیست یا منقضی شده.\n"
+            "لطفاً خودتان بنویسید: شروع بازی",
+            show_alert=True,
+        )
+        return
+
+    if is_expired(session):
+        sessions.pop(key, None)
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    try:
+        throws_count = int(throws_str)
+        if throws_count not in (1, 2, 3):
+            raise ValueError
+    except ValueError:
+        await q.answer("مقدار نامعتبر.", show_alert=True)
+        return
+
+    session["updated_at"] = now_ts()
+    await q.answer()
+
+    mid = format(random.randint(0, 0xFFFFFFFF), '08x')
+    bb_matches[mid] = {
+        "match_id": mid,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "player1_id": user_id,
+        "player1_name": session["username"],
+        "player2_id": None,
+        "player2_name": None,
+        "throws_count": throws_count,
+        "p1_throws": [],
+        "p2_throws": [],
+        "score1": 0,
+        "score2": 0,
+        "last_shot": None,
+        "status": "waiting",
+        "updated_at": now_ts(),
+    }
+    sessions.pop(key, None)
+    await q.edit_message_text(
+        f"🏀 بسکتبال | تعداد پرتاب: {throws_count}\n\n"
+        f"👤 {session['username']} منتظر حریف است...\n\n"
+        f"هر کسی می‌خواد بازی کنه روی دکمه زیر بزنه:",
+        reply_markup=bb_join_kb(mid),
+    )
+
+
+async def handle_bb_join(q, mid):
+    match = bb_matches.get(mid)
+    if not match or is_expired(match):
+        bb_matches.pop(mid, None)
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    if match["status"] != "waiting":
+        await q.answer("بازی قبلاً شروع شده.", show_alert=True)
+        return
+
+    user_id = q.from_user.id
+    if user_id == match["player1_id"]:
+        await q.answer("نمی‌تونی با خودت بازی کنی!", show_alert=True)
+        return
+
+    match["player2_id"] = user_id
+    match["player2_name"] = user_display(q.from_user)
+    match["status"] = "playing"
+    match["updated_at"] = now_ts()
+
+    await q.answer("🎮 وارد بازی شدی!")
+
+    try:
+        await q.edit_message_text(
+            build_bb_text(match),
+            reply_markup=bb_play_kb(mid),
+        )
+    except Exception as e:
+        logging.exception("bb join edit: %s", e)
+
+
+async def handle_bb_cancel(q, mid):
+    match = bb_matches.get(mid)
+    if not match:
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    if q.from_user.id != match["player1_id"]:
+        await q.answer("فقط سازنده بازی می‌تونه لغو کنه.", show_alert=True)
+        return
+
+    bb_matches.pop(mid, None)
+    await q.answer()
+    try:
+        await q.edit_message_text(
+            "❌ بازی لغو شد.\nبرای شروع دوباره بنویسید: شروع بازی",
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+
+
+async def handle_bb_end(q, mid):
+    match = bb_matches.get(mid)
+    if not match:
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    user_id = q.from_user.id
+    if user_id != match["player1_id"] and user_id != match["player2_id"]:
+        await q.answer("شما در این بازی نیستید.", show_alert=True)
+        return
+
+    p1 = match["player1_name"]
+    p2 = match["player2_name"]
+
+    if match["score1"] > match["score2"]:
+        final = f"🏆 برنده نهایی: {p1}"
+    elif match["score2"] > match["score1"]:
+        final = f"🏆 برنده نهایی: {p2}"
+    else:
+        final = "🤝 بازی مساوی تمام شد!"
+
+    bb_matches.pop(mid, None)
+    await q.answer()
+    try:
+        await q.edit_message_text(
+            f"🏀 پایان بازی بسکتبال\n\n"
+            f"👤 {p1}: {throws_display(match['p1_throws'])}\n"
+            f"   گل: {match['score1']}\n\n"
+            f"👤 {p2}: {throws_display(match['p2_throws'])}\n"
+            f"   گل: {match['score2']}\n\n"
+            f"{final}\n\n"
+            f"برای شروع دوباره بنویسید: شروع بازی",
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+
+
 async def handle_session_callback(q, chat_id, user_id, message_id, data):
     key = (chat_id, user_id)
     session = sessions.get(key)
@@ -260,6 +597,13 @@ async def handle_session_callback(q, chat_id, user_id, message_id, data):
         await q.edit_message_text(
             "✂️ سنگ کاغذ قیچی\n\nبا کی می‌خوای بازی کنی؟",
             reply_markup=RPS_OPPONENT_KB,
+        )
+
+    elif data == "menu_bb":
+        await q.edit_message_text(
+            "🏀 بسکتبال\n\n"
+            "تعداد پرتاب هر نفر رو انتخاب کن:",
+            reply_markup=BB_THROWS_KB,
         )
 
     elif data == "menu_back":
@@ -537,6 +881,21 @@ async def cleanup_task():
                     )
                 except Exception:
                     pass
+
+            for mid in [m for m, x in bb_matches.items() if is_expired(x)]:
+                match = bb_matches.pop(mid, None)
+                if not match:
+                    continue
+                try:
+                    await app_telegram.bot.edit_message_text(
+                        chat_id=match["chat_id"],
+                        message_id=match["message_id"],
+                        text="⏰ این بازی به دلیل عدم فعالیت بسته شد.\n"
+                             "برای شروع دوباره بنویسید: شروع بازی",
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logging.exception("cleanup error: %s", e)
 
@@ -645,6 +1004,10 @@ async def main_async():
     app_telegram.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.Regex(r'شروع بازی'),
         on_group_message
+    ))
+    app_telegram.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'🏀'),
+        on_basketball_shot
     ))
 
     await app_telegram.initialize()
