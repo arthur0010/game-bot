@@ -12,6 +12,8 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes
 )
 
+from data.riddles import RIDDLES
+
 logging.basicConfig(
     format='[%(levelname)s %(asctime)s] %(name)s: %(message)s',
     level=logging.INFO
@@ -23,6 +25,7 @@ RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 SESSION_TIMEOUT = 1800
 CLEANUP_INTERVAL = 60
 TRIGGER_TEXT = "شروع بازی"
+RIDDLE_TRIGGER = "چیستان"
 BASKETBALL_EMOJI = "🏀"
 FOOTBALL_EMOJI = "⚽"
 
@@ -32,6 +35,7 @@ bb_matches = {}
 bb_index = {}
 fb_matches = {}
 fb_index = {}
+riddle_sessions = {}
 
 app_telegram = None
 main_loop = None
@@ -80,6 +84,17 @@ FB_THROWS_KB = InlineKeyboardMarkup([
         InlineKeyboardButton("3 شوت", callback_data="fb_throws|3"),
     ],
     [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back")],
+])
+
+RIDDLE_START_KB = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("💡 راهنمایی", callback_data="rdl_hint"),
+        InlineKeyboardButton("✅ جواب", callback_data="rdl_ans"),
+    ],
+])
+
+RIDDLE_HINT_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("✅ جواب", callback_data="rdl_ans")],
 ])
 
 
@@ -228,6 +243,34 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def on_riddle_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    chat_type = update.effective_chat.type
+    if chat_type != "group" and chat_type != "supergroup":
+        return
+    if msg.text.strip() != RIDDLE_TRIGGER:
+        return
+
+    riddle = random.choice(RIDDLES)
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    sent = await msg.reply_text(
+        f"🧩 چیستان\n\n{riddle['q']}",
+        reply_markup=RIDDLE_START_KB,
+    )
+
+    riddle_sessions[(chat_id, sent.message_id)] = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "riddle": riddle,
+        "hint_shown": False,
+        "updated_at": now_ts(),
+    }
+
+
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text:
@@ -352,10 +395,7 @@ async def process_basketball_shot(context, match, user_id, scored_override, shot
             pass
         return
 
-    if scored_override is None:
-        scored = random.random() < 0.5
-    else:
-        scored = scored_override
+    scored = scored_override if scored_override is not None else (random.random() < 0.5)
 
     throws.append(scored)
     shot_num = len(throws)
@@ -407,10 +447,7 @@ async def process_football_shot(context, match, user_id, scored_override, shot_m
             pass
         return
 
-    if scored_override is None:
-        scored = random.random() < 0.5
-    else:
-        scored = scored_override
+    scored = scored_override if scored_override is not None else (random.random() < 0.5)
 
     throws.append(scored)
     shot_num = len(throws)
@@ -518,6 +555,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = data.split("|")
         action = parts[0]
 
+        if action == "rdl_hint":
+            await handle_riddle_callback(q, "hint")
+            return
+        if action == "rdl_ans":
+            await handle_riddle_callback(q, "ans")
+            return
         if action == "rps_join":
             await handle_rps_join(q, parts[1])
             return
@@ -567,6 +610,60 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("خطای غیرمنتظره رخ داد.", show_alert=True)
         except Exception:
             pass
+
+
+async def handle_riddle_callback(q, action):
+    chat_id = q.message.chat.id
+    message_id = q.message.message_id
+    key = (chat_id, message_id)
+
+    session = riddle_sessions.get(key)
+    if not session or is_expired(session):
+        riddle_sessions.pop(key, None)
+        await q.answer("این چیستان منقضی شده.", show_alert=True)
+        return
+
+    if q.from_user.id != session["user_id"]:
+        await q.answer(
+            "این چیستان برای شما نیست.\nخودتان بنویسید: چیستان",
+            show_alert=True,
+        )
+        return
+
+    riddle = session["riddle"]
+
+    if action == "hint":
+        if session["hint_shown"]:
+            await q.answer("راهنمایی قبلاً نمایش داده شده.", show_alert=True)
+            return
+        session["hint_shown"] = True
+        session["updated_at"] = now_ts()
+        await q.answer()
+
+        try:
+            await q.edit_message_text(
+                f"🧩 چیستان\n\n"
+                f"{riddle['q']}\n\n"
+                f"💡 راهنمایی: {riddle['hint']}",
+                reply_markup=RIDDLE_HINT_KB,
+            )
+        except Exception as e:
+            logging.exception("riddle hint edit: %s", e)
+
+    elif action == "ans":
+        await q.answer()
+
+        text = f"🧩 چیستان\n\n{riddle['q']}\n\n"
+        if session["hint_shown"]:
+            text += f"💡 راهنمایی: {riddle['hint']}\n\n"
+        text += f"✅ جواب: {riddle['a']}"
+
+        try:
+            await q.edit_message_text(text, reply_markup=None)
+        except Exception as e:
+            logging.exception("riddle ans edit: %s", e)
+
+        riddle_sessions.pop(key, None)
 
 
 async def handle_botpick(q, choice):
@@ -1254,6 +1351,9 @@ async def cleanup_task():
                     )
                 except Exception:
                     pass
+
+            for key in [k for k, s in riddle_sessions.items() if is_expired(s)]:
+                riddle_sessions.pop(key, None)
         except Exception as e:
             logging.exception("cleanup error: %s", e)
 
@@ -1369,7 +1469,11 @@ async def main_async():
     app_telegram.add_handler(CommandHandler("start", on_start))
     app_telegram.add_handler(CallbackQueryHandler(on_callback))
     app_telegram.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex(r'شروع بازی'),
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^چیستان$'),
+        on_riddle_request
+    ))
+    app_telegram.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^شروع بازی$'),
         on_group_message
     ))
     app_telegram.add_handler(MessageHandler(bb_shot_filter, on_basketball_shot))
