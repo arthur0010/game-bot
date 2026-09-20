@@ -47,9 +47,9 @@ RPS_OPPONENT_KB = InlineKeyboardMarkup([
 
 RPS_PICK_BOT_KB = InlineKeyboardMarkup([
     [
-        InlineKeyboardButton("🪨 سنگ", callback_data="rps_botpick_r"),
-        InlineKeyboardButton("📄 کاغذ", callback_data="rps_botpick_p"),
-        InlineKeyboardButton("✂️ قیچی", callback_data="rps_botpick_s"),
+        InlineKeyboardButton("🪨 سنگ", callback_data="rps_botpick|r"),
+        InlineKeyboardButton("📄 کاغذ", callback_data="rps_botpick|p"),
+        InlineKeyboardButton("✂️ قیچی", callback_data="rps_botpick|s"),
     ],
     [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_rps")],
 ])
@@ -63,25 +63,25 @@ RPS_BOT_RESULT_KB = InlineKeyboardMarkup([
 
 def rps_join_kb(mid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✋ من می‌خوام بازی کنم", callback_data=f"rps_join_{mid}")],
-        [InlineKeyboardButton("❌ لغو", callback_data=f"rps_cancel_{mid}")],
+        [InlineKeyboardButton("✋ من می‌خوام بازی کنم", callback_data=f"rps_join|{mid}")],
+        [InlineKeyboardButton("❌ لغو", callback_data=f"rps_cancel|{mid}")],
     ])
 
 
 def rps_pick_kb(mid):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🪨 سنگ", callback_data=f"rps_pick_r_{mid}"),
-            InlineKeyboardButton("📄 کاغذ", callback_data=f"rps_pick_p_{mid}"),
-            InlineKeyboardButton("✂️ قیچی", callback_data=f"rps_pick_s_{mid}"),
+            InlineKeyboardButton("🪨 سنگ", callback_data=f"rps_pick|r|{mid}"),
+            InlineKeyboardButton("📄 کاغذ", callback_data=f"rps_pick|p|{mid}"),
+            InlineKeyboardButton("✂️ قیچی", callback_data=f"rps_pick|s|{mid}"),
         ],
     ])
 
 
 def rps_result_kb(mid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔁 دست بعدی", callback_data=f"rps_next_{mid}")],
-        [InlineKeyboardButton("❌ پایان بازی", callback_data=f"rps_end_{mid}")],
+        [InlineKeyboardButton("🔁 دست بعدی", callback_data=f"rps_next|{mid}")],
+        [InlineKeyboardButton("❌ پایان بازی", callback_data=f"rps_end|{mid}")],
     ])
 
 
@@ -166,23 +166,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
     try:
-        if data.startswith("rps_join_"):
-            await handle_rps_join(q, data[9:])
+        parts = data.split("|")
+        action = parts[0]
+
+        if action == "rps_join":
+            await handle_rps_join(q, parts[1])
             return
-        if data.startswith("rps_cancel_"):
-            await handle_rps_cancel(q, data[11:])
+        if action == "rps_cancel":
+            await handle_rps_cancel(q, parts[1])
             return
-        if data.startswith("rps_pick_"):
-            rest = data[9:]
-            choice, _, mid = rest.partition("_")
-            await handle_rps_pick(q, mid, choice)
+        if action == "rps_pick":
+            await handle_rps_pick(q, parts[2], parts[1])
             return
-        if data.startswith("rps_next_"):
-            await handle_rps_next(q, data[9:])
+        if action == "rps_next":
+            await handle_rps_next(q, parts[1])
             return
-        if data.startswith("rps_end_"):
-            await handle_rps_end(q, data[8:])
+        if action == "rps_end":
+            await handle_rps_end(q, parts[1])
             return
+        if action == "rps_botpick":
+            await handle_botpick(q, parts[1])
+            return
+
         await handle_session_callback(
             q, q.message.chat.id, q.from_user.id, q.message.message_id, data
         )
@@ -192,6 +197,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("خطای غیرمنتظره رخ داد.", show_alert=True)
         except Exception:
             pass
+
+
+async def handle_botpick(q, choice):
+    chat_id = q.message.chat.id
+    user_id = q.from_user.id
+    key = (chat_id, user_id)
+    session = sessions.get(key)
+
+    if not session:
+        await q.answer(
+            "این بازی برای شما نیست یا منقضی شده.\n"
+            "لطفاً خودتان بنویسید: شروع بازی",
+            show_alert=True,
+        )
+        return
+
+    if is_expired(session):
+        sessions.pop(key, None)
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    session["updated_at"] = now_ts()
+    await q.answer()
+    await play_with_bot(q, session, choice)
 
 
 async def handle_session_callback(q, chat_id, user_id, message_id, data):
@@ -246,9 +275,6 @@ async def handle_session_callback(q, chat_id, user_id, message_id, data):
             reply_markup=RPS_PICK_BOT_KB,
         )
 
-    elif data.startswith("rps_botpick_"):
-        await play_with_bot(q, session, data[11:])
-
     elif data == "rps_with_user":
         mid = format(random.randint(0, 0xFFFFFFFF), '08x')
         matches[mid] = {
@@ -276,6 +302,10 @@ async def handle_session_callback(q, chat_id, user_id, message_id, data):
 
 
 async def play_with_bot(q, session, choice):
+    if choice not in RPS_NAMES:
+        await q.answer("انتخاب نامعتبر.", show_alert=True)
+        return
+
     bot_choice = random.choice(RPS_CHOICES)
 
     if choice == bot_choice:
