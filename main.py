@@ -54,12 +54,6 @@ RPS_PICK_BOT_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_rps")],
 ])
 
-RPS_BOT_RESULT_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🔁 بازی مجدد", callback_data="rps_with_bot")],
-    [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="menu_back")],
-    [InlineKeyboardButton("❌ خروج", callback_data="menu_exit")],
-])
-
 
 def rps_join_kb(mid):
     return InlineKeyboardMarkup([
@@ -171,6 +165,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_id": user_id,
         "username": user_display(user),
         "message_id": sent.message_id,
+        "bot_last_round": None,
         "updated_at": now_ts(),
     }
 
@@ -281,6 +276,7 @@ async def handle_session_callback(q, chat_id, user_id, message_id, data):
         )
 
     elif data == "rps_with_bot":
+        session["bot_last_round"] = None
         await q.edit_message_text(
             "✂️ سنگ کاغذ قیچی با ربات\n\nانتخاب کن:",
             reply_markup=RPS_PICK_BOT_KB,
@@ -327,14 +323,19 @@ async def play_with_bot(q, session, choice):
     else:
         result = "😅 باختی!"
 
+    session["bot_last_round"] = (
+        f"🕐 دست قبل:\n"
+        f"👤 تو: {RPS_NAMES[choice]}\n"
+        f"🤖 ربات: {RPS_NAMES[bot_choice]}\n"
+        f"{result}"
+    )
     session["updated_at"] = now_ts()
 
     await q.edit_message_text(
-        f"✂️ نتیجه بازی با ربات\n\n"
-        f"👤 تو: {RPS_NAMES[choice]}\n"
-        f"🤖 ربات: {RPS_NAMES[bot_choice]}\n\n"
-        f"{result}",
-        reply_markup=RPS_BOT_RESULT_KB,
+        f"✂️ سنگ کاغذ قیچی با ربات\n\n"
+        f"{session['bot_last_round']}\n\n"
+        f"انتخاب کن:",
+        reply_markup=RPS_PICK_BOT_KB,
     )
 
 
