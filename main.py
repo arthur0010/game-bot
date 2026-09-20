@@ -96,13 +96,20 @@ def build_match_text(match):
     p2 = match["player2_name"] or "—"
     s1 = "✅" if match["p1_choice"] else "⏳"
     s2 = "✅" if match["p2_choice"] else "⏳"
-    return (
+
+    text = (
         f"✂️ سنگ کاغذ قیچی\n\n"
         f"👤 {p1}: {s1}\n"
         f"👤 {p2}: {s2}\n\n"
-        f"📊 امتیاز:  {p1} {match['score1']} — {match['score2']} {p2}\n\n"
-        f"هر دو نفر انتخاب کنید:"
+        f"📊 امتیاز:  {p1} {match['score1']} — {match['score2']} {p2}\n"
     )
+
+    last_round = match.get("last_round")
+    if last_round:
+        text += f"\n{last_round}\n"
+
+    text += "\nهر دو نفر انتخاب کنید:"
+    return text
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -119,10 +126,8 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎮 سلام!\n\n"
         "من یک ربات بازی و سرگرمی برای گروه‌ها هستم.\n\n"
-        "برای شروع، من رو به گروهت اضافه کن و اونجا بنویس:\n"
-        "شروع بازی\n\n"
-        "🎲 بازی‌های موجود:\n"
-        "✂️ سنگ کاغذ قیچی (با ربات / با کاربر)",
+        "من رو به گروهت اضافه کن و اونجا بنویس:\n"
+        "شروع بازی",
         reply_markup=kb,
     )
 
@@ -295,6 +300,7 @@ async def handle_session_callback(q, chat_id, user_id, message_id, data):
             "p2_choice": None,
             "score1": 0,
             "score2": 0,
+            "last_round": None,
             "status": "waiting",
             "updated_at": now_ts(),
         }
@@ -429,24 +435,22 @@ async def handle_rps_pick(q, mid, choice):
 async def show_match_result(q, match):
     c1 = match["p1_choice"]
     c2 = match["p2_choice"]
+    p1 = match["player1_name"]
+    p2 = match["player2_name"]
 
     if c1 == c2:
-        result_line = "🤝 این دست مساوی شد!"
+        result_line = "🤝 مساوی"
     elif (c1, c2) in WINNING_MOVES:
         match["score1"] += 1
-        result_line = f"🏆 برنده این دست: {match['player1_name']}"
+        result_line = f"🏆 برنده: {p1}"
     else:
         match["score2"] += 1
-        result_line = f"🏆 برنده این دست: {match['player2_name']}"
+        result_line = f"🏆 برنده: {p2}"
 
-    result_text = (
-        f"✂️ نتیجه این دست\n\n"
-        f"👤 {match['player1_name']}: {RPS_NAMES[c1]}\n"
-        f"👤 {match['player2_name']}: {RPS_NAMES[c2]}\n\n"
-        f"{result_line}\n\n"
-        f"📊 امتیاز کل:\n"
-        f"{match['player1_name']}: {match['score1']}\n"
-        f"{match['player2_name']}: {match['score2']}"
+    match["last_round"] = (
+        f"🕐 دست قبل:\n"
+        f"{p1}: {RPS_NAMES[c1]}  |  {p2}: {RPS_NAMES[c2]}\n"
+        f"{result_line}"
     )
 
     match["p1_choice"] = None
@@ -454,17 +458,12 @@ async def show_match_result(q, match):
     match["updated_at"] = now_ts()
 
     try:
-        await q.message.reply_text(result_text)
-    except Exception as e:
-        logging.exception("send result: %s", e)
-
-    try:
         await q.edit_message_text(
             build_match_text(match),
             reply_markup=rps_pick_kb(match["match_id"]),
         )
     except Exception as e:
-        logging.exception("edit next round: %s", e)
+        logging.exception("edit result: %s", e)
 
 
 async def handle_rps_end(q, mid):
