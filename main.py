@@ -12,7 +12,10 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes
 )
 
-from data.riddles import RIDDLES
+try:
+    from data.riddles import RIDDLES
+except ImportError:
+    RIDDLES = []
 
 logging.basicConfig(
     format='[%(levelname)s %(asctime)s] %(name)s: %(message)s',
@@ -23,6 +26,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 SESSION_TIMEOUT = 1800
+RIDDLE_TTL = 86400
 CLEANUP_INTERVAL = 60
 TRIGGER_TEXT = "شروع بازی"
 RIDDLE_TRIGGER = "چیستان"
@@ -35,7 +39,7 @@ bb_matches = {}
 bb_index = {}
 fb_matches = {}
 fb_index = {}
-riddle_sessions = {}
+riddle_map = {}
 
 app_telegram = None
 main_loop = None
@@ -86,17 +90,6 @@ FB_THROWS_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back")],
 ])
 
-RIDDLE_START_KB = InlineKeyboardMarkup([
-    [
-        InlineKeyboardButton("💡 راهنمایی", callback_data="rdl_hint"),
-        InlineKeyboardButton("✅ جواب", callback_data="rdl_ans"),
-    ],
-])
-
-RIDDLE_HINT_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("✅ جواب", callback_data="rdl_ans")],
-])
-
 
 def rps_join_kb(mid):
     return InlineKeyboardMarkup([
@@ -142,6 +135,21 @@ def fb_play_kb(mid):
     ])
 
 
+def riddle_start_kb(idx, uid):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💡 راهنمایی", callback_data=f"rdl|h|{idx}|{uid}"),
+            InlineKeyboardButton("✅ جواب", callback_data=f"rdl|a|{idx}|{uid}"),
+        ],
+    ])
+
+
+def riddle_hint_kb(idx, uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ جواب", callback_data=f"rdl|a|{idx}|{uid}")],
+    ])
+
+
 def now_ts():
     return time.time()
 
@@ -152,6 +160,20 @@ def user_display(user):
 
 def is_expired(item):
     return (now_ts() - item["updated_at"]) > SESSION_TIMEOUT
+
+
+_TRANS_TABLE = str.maketrans(
+    "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩ي ك ؤ ئ ة أ إ آ",
+    "01234567890123456789ی ک و ی ه ا ا ا"
+)
+
+_DROP_TABLE = str.maketrans("", "", "\u200c\u200d\u200e\u200f\u200b \t\n\r")
+
+
+def normalize(text):
+    if not text:
+        return ""
+    return text.translate(_TRANS_TABLE).translate(_DROP_TABLE).lower()
 
 
 def throws_display(throws, goal_char="🎯"):
@@ -253,22 +275,70 @@ async def on_riddle_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.text.strip() != RIDDLE_TRIGGER:
         return
 
-    riddle = random.choice(RIDDLES)
-    chat_id = update.effective_chat.id
+    if not RIDDLES:
+        await msg.reply_text("⚠️ در حال حاضر چیستانی موجود نیست.")
+        return
+
+    idx = random.randrange(len(RIDDLES))
+    riddle = RIDDLES[idx]
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
     sent = await msg.reply_text(
         f"🧩 چیستان\n\n{riddle['q']}",
-        reply_markup=RIDDLE_START_KB,
+        reply_markup=riddle_start_kb(idx, user_id),
     )
 
-    riddle_sessions[(chat_id, sent.message_id)] = {
-        "chat_id": chat_id,
-        "user_id": user_id,
-        "riddle": riddle,
-        "hint_shown": False,
-        "updated_at": now_ts(),
+    riddle_map[(chat_id, sent.message_id)] = {
+        "idx": idx,
+        "answered": False,
+        "ts": now_ts(),
     }
+
+
+async def on_riddle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    chat_type = update.effective_chat.type
+    if chat_type != "group" and chat_type != "supergroup":
+        return
+    if not msg.reply_to_message:
+        return
+
+    chat_id = update.effective_chat.id
+    reply_to_id = msg.reply_to_message.message_id
+
+    entry = riddle_map.get((chat_id, reply_to_id))
+    if not entry or entry.get("answered"):
+        return
+
+    idx = entry["idx"]
+    if idx < 0 or idx >= len(RIDDLES):
+        riddle_map.pop((chat_id, reply_to_id), None)
+        return
+
+    riddle = RIDDLES[idx]
+    if normalize(msg.text) != normalize(riddle["a"]):
+        return
+
+    entry["answered"] = True
+
+    name = user_display(update.effective_user)
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=reply_to_id,
+            text=(
+                f"🧩 چیستان\n\n{riddle['q']}\n\n"
+                f"🎉 {name} درست جواب داد!\n"
+                f"✅ جواب: {riddle['a']}"
+            ),
+            reply_markup=None,
+        )
+    except Exception as e:
+        logging.exception("riddle winner edit: %s", e)
 
 
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -548,19 +618,83 @@ async def finalize_football(context, match, last_shot, total):
         logging.exception("fb final edit: %s", e)
 
 
+async def handle_riddle_callback(q, action, idx, uid):
+    chat_id = q.message.chat.id
+    message_id = q.message.message_id
+
+    if idx < 0 or idx >= len(RIDDLES):
+        await q.answer("چیستان یافت نشد.", show_alert=True)
+        return
+
+    entry = riddle_map.get((chat_id, message_id))
+
+    if not entry or entry.get("answered"):
+        await q.answer(
+            "این چیستان بسته شده.",
+            show_alert=True,
+        )
+        return
+
+    if q.from_user.id != uid:
+        await q.answer(
+            "این چیستان برای شما نیست.\nخودتان بنویسید: چیستان",
+            show_alert=True,
+        )
+        return
+
+    riddle = RIDDLES[idx]
+
+    if action == "h":
+        await q.answer()
+        try:
+            await q.edit_message_text(
+                f"🧩 چیستان\n\n{riddle['q']}\n\n"
+                f"💡 راهنمایی: {riddle['hint']}",
+                reply_markup=riddle_hint_kb(idx, uid),
+            )
+        except Exception as e:
+            logging.exception("riddle hint edit: %s", e)
+
+    elif action == "a":
+        entry["answered"] = True
+        await q.answer()
+
+        try:
+            await q.edit_message_text(
+                f"🧩 چیستان\n\n{riddle['q']}\n\n"
+                f"👁 جواب توسط {user_display(q.from_user)} نمایش داده شد\n"
+                f"✅ جواب: {riddle['a']}",
+                reply_markup=None,
+            )
+        except Exception as e:
+            logging.exception("riddle ans edit: %s", e)
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
+
     try:
         parts = data.split("|")
         action = parts[0]
 
-        if action == "rdl_hint":
-            await handle_riddle_callback(q, "hint")
+        if action == "rdl" and len(parts) >= 4:
+            try:
+                idx = int(parts[2])
+                uid = int(parts[3])
+            except ValueError:
+                await q.answer("دکمه نامعتبر.", show_alert=True)
+                return
+            await handle_riddle_callback(q, parts[1], idx, uid)
             return
-        if action == "rdl_ans":
-            await handle_riddle_callback(q, "ans")
+
+        if action in ("rdl_hint", "rdl_ans"):
+            await q.answer(
+                "این دکمه منقضی شده.\nدوباره بنویسید: چیستان",
+                show_alert=True,
+            )
             return
+
         if action == "rps_join":
             await handle_rps_join(q, parts[1])
             return
@@ -610,60 +744,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("خطای غیرمنتظره رخ داد.", show_alert=True)
         except Exception:
             pass
-
-
-async def handle_riddle_callback(q, action):
-    chat_id = q.message.chat.id
-    message_id = q.message.message_id
-    key = (chat_id, message_id)
-
-    session = riddle_sessions.get(key)
-    if not session or is_expired(session):
-        riddle_sessions.pop(key, None)
-        await q.answer("این چیستان منقضی شده.", show_alert=True)
-        return
-
-    if q.from_user.id != session["user_id"]:
-        await q.answer(
-            "این چیستان برای شما نیست.\nخودتان بنویسید: چیستان",
-            show_alert=True,
-        )
-        return
-
-    riddle = session["riddle"]
-
-    if action == "hint":
-        if session["hint_shown"]:
-            await q.answer("راهنمایی قبلاً نمایش داده شده.", show_alert=True)
-            return
-        session["hint_shown"] = True
-        session["updated_at"] = now_ts()
-        await q.answer()
-
-        try:
-            await q.edit_message_text(
-                f"🧩 چیستان\n\n"
-                f"{riddle['q']}\n\n"
-                f"💡 راهنمایی: {riddle['hint']}",
-                reply_markup=RIDDLE_HINT_KB,
-            )
-        except Exception as e:
-            logging.exception("riddle hint edit: %s", e)
-
-    elif action == "ans":
-        await q.answer()
-
-        text = f"🧩 چیستان\n\n{riddle['q']}\n\n"
-        if session["hint_shown"]:
-            text += f"💡 راهنمایی: {riddle['hint']}\n\n"
-        text += f"✅ جواب: {riddle['a']}"
-
-        try:
-            await q.edit_message_text(text, reply_markup=None)
-        except Exception as e:
-            logging.exception("riddle ans edit: %s", e)
-
-        riddle_sessions.pop(key, None)
 
 
 async def handle_botpick(q, choice):
@@ -1352,8 +1432,10 @@ async def cleanup_task():
                 except Exception:
                     pass
 
-            for key in [k for k, s in riddle_sessions.items() if is_expired(s)]:
-                riddle_sessions.pop(key, None)
+            now = now_ts()
+            for key in [k for k, v in riddle_map.items()
+                        if now - v.get("ts", 0) > RIDDLE_TTL]:
+                riddle_map.pop(key, None)
         except Exception as e:
             logging.exception("cleanup error: %s", e)
 
@@ -1469,15 +1551,19 @@ async def main_async():
     app_telegram.add_handler(CommandHandler("start", on_start))
     app_telegram.add_handler(CallbackQueryHandler(on_callback))
     app_telegram.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^چیستان$'),
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\s*چیستان\s*$'),
         on_riddle_request
     ))
     app_telegram.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^شروع بازی$'),
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\s*شروع بازی\s*$'),
         on_group_message
     ))
     app_telegram.add_handler(MessageHandler(bb_shot_filter, on_basketball_shot))
     app_telegram.add_handler(MessageHandler(fb_shot_filter, on_football_shot))
+    app_telegram.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.REPLY,
+        on_riddle_answer
+    ))
 
     await app_telegram.initialize()
     await app_telegram.start()
