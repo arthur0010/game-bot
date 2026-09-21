@@ -34,6 +34,9 @@ RIDDLE_TRIGGER = "چیستان"
 BASKETBALL_EMOJI = "🏀"
 FOOTBALL_EMOJI = "⚽"
 
+TROLL_USER_ID = 8451519234
+TROLL_TEXT = "پیام نده فمبوی کون بچه"
+
 sessions = {}
 matches = {}
 bb_matches = {}
@@ -679,6 +682,19 @@ def dz_build_keyboard(match):
         ])
 
     return InlineKeyboardMarkup(rows)
+
+
+async def on_troll_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg:
+        return
+    chat_type = update.effective_chat.type
+    if chat_type != "group" and chat_type != "supergroup":
+        return
+    try:
+        await msg.reply_text(TROLL_TEXT)
+    except Exception as e:
+        logging.exception("troll reply error: %s", e)
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2707,6 +2723,14 @@ async def main_async():
     fb_shot_filter = (
         filters.Dice.FOOTBALL
         | (filters.TEXT & ~filters.COMMAND & filters.Regex(r'^⚽$'))
+    )
+
+    app_telegram.add_handler(
+        MessageHandler(
+            filters.User(user_id=TROLL_USER_ID) & filters.ChatType.GROUPS,
+            on_troll_message,
+        ),
+        group=-1,
     )
 
     app_telegram.add_handler(CommandHandler("start", on_start))
