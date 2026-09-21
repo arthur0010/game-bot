@@ -57,17 +57,17 @@ MS_DIFFICULTIES = {
     "h": {"size": 8, "mines": 15},
 }
 
+DZ_DIFFICULTIES = {
+    "e": {"size": 3, "need": 3, "smart": 0.30, "label": "آسان"},
+    "m": {"size": 4, "need": 3, "smart": 0.70, "label": "متوسط"},
+    "h": {"size": 5, "need": 4, "smart": 1.00, "label": "سخت"},
+}
+
 BOT_MS_LABEL = "🤖 ربات"
 
 DZ_SYM_X = "❌"
 DZ_SYM_O = "⭕"
 DZ_EMPTY = "⬜"
-
-DZ_WIN_LINES = (
-    (0, 1, 2), (3, 4, 5), (6, 7, 8),
-    (0, 3, 6), (1, 4, 7), (2, 5, 8),
-    (0, 4, 8), (2, 4, 6),
-)
 
 MAIN_MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("✂️ سنگ کاغذ قیچی", callback_data="menu_rps")],
@@ -134,6 +134,15 @@ def ms_diff_kb(vs):
         [InlineKeyboardButton("🟡 متوسط (8x8، 10 مین)", callback_data=f"msd|{vs}|m")],
         [InlineKeyboardButton("🔴 سخت (8x8، 15 مین)", callback_data=f"msd|{vs}|h")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_ms")],
+    ])
+
+
+def dz_diff_kb(vs):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 آسان (3x3)", callback_data=f"dzd|{vs}|e")],
+        [InlineKeyboardButton("🟡 متوسط (4x4)", callback_data=f"dzd|{vs}|m")],
+        [InlineKeyboardButton("🔴 سخت (5x5)", callback_data=f"dzd|{vs}|h")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_dz")],
     ])
 
 
@@ -438,63 +447,95 @@ def ms_build_keyboard(match):
     return InlineKeyboardMarkup(rows)
 
 
-def dz_check_winner(board):
-    for a, b, c in DZ_WIN_LINES:
-        if board[a] is not None and board[a] == board[b] == board[c]:
-            return board[a]
+def dz_check_winner(board, size, need):
+    for r in range(size):
+        for c in range(size - need + 1):
+            first = board[r * size + c]
+            if first is None:
+                continue
+            ok = True
+            for k in range(1, need):
+                if board[r * size + c + k] != first:
+                    ok = False
+                    break
+            if ok:
+                return first
+
+    for c in range(size):
+        for r in range(size - need + 1):
+            first = board[r * size + c]
+            if first is None:
+                continue
+            ok = True
+            for k in range(1, need):
+                if board[(r + k) * size + c] != first:
+                    ok = False
+                    break
+            if ok:
+                return first
+
+    for r in range(size - need + 1):
+        for c in range(size - need + 1):
+            first = board[r * size + c]
+            if first is None:
+                continue
+            ok = True
+            for k in range(1, need):
+                if board[(r + k) * size + c + k] != first:
+                    ok = False
+                    break
+            if ok:
+                return first
+
+    for r in range(size - need + 1):
+        for c in range(need - 1, size):
+            first = board[r * size + c]
+            if first is None:
+                continue
+            ok = True
+            for k in range(1, need):
+                if board[(r + k) * size + c - k] != first:
+                    ok = False
+                    break
+            if ok:
+                return first
+
     return None
 
 
-def dz_is_full(board):
-    for cell in board:
-        if cell is None:
-            return False
-    return True
+def dz_find_winning_move(board, size, need, sym):
+    for i in range(len(board)):
+        if board[i] is not None:
+            continue
+        board[i] = sym
+        w = dz_check_winner(board, size, need)
+        board[i] = None
+        if w == sym:
+            return i
+    return None
 
 
-def dz_minimax(board, turn, bot_sym, opp_sym, depth):
-    w = dz_check_winner(board)
-    if w == bot_sym:
-        return 10 - depth
-    if w == opp_sym:
-        return depth - 10
-    if dz_is_full(board):
-        return 0
+def dz_bot_choose(board, size, need, smart_chance):
+    empty = [i for i in range(len(board)) if board[i] is None]
+    if not empty:
+        return None
 
-    if turn == bot_sym:
-        best = -1000
-        for i in range(9):
-            if board[i] is None:
-                board[i] = bot_sym
-                score = dz_minimax(board, opp_sym, bot_sym, opp_sym, depth + 1)
-                board[i] = None
-                if score > best:
-                    best = score
-        return best
-    else:
-        best = 1000
-        for i in range(9):
-            if board[i] is None:
-                board[i] = opp_sym
-                score = dz_minimax(board, bot_sym, bot_sym, opp_sym, depth + 1)
-                board[i] = None
-                if score < best:
-                    best = score
-        return best
+    if random.random() >= smart_chance:
+        return random.choice(empty)
 
+    cell = dz_find_winning_move(board, size, need, "o")
+    if cell is not None:
+        return cell
 
-def dz_bot_choose(board):
-    best_score = -1000
-    best_cell = None
-    for i in range(9):
-        if board[i] is None:
-            board[i] = "o"
-            score = dz_minimax(board, "x", "o", "x", 1)
-            board[i] = None
-            if score > best_score:
-                best_score = score
-                best_cell = i
-    return best_cell
+    cell = dz_find_winning_move(board, size, need, "x")
+    if cell is not None:
+        return cell
+
+    center = (size // 2) * size + (size // 2)
+    if board[center] is None:
+        return center
+
+    return random.choice(empty)
 
 
 def dz_turn_name(match):
@@ -506,7 +547,7 @@ def dz_turn_name(match):
 def dz_apply_move(match, user_id, cell):
     if match["status"] != "playing":
         return "invalid"
-    if cell < 0 or cell > 8:
+    if cell < 0 or cell >= len(match["board"]):
         return "invalid"
     if match["board"][cell] is not None:
         return "invalid"
@@ -520,7 +561,7 @@ def dz_apply_move(match, user_id, cell):
 
     match["board"][cell] = sym
 
-    winner = dz_check_winner(match["board"])
+    winner = dz_check_winner(match["board"], match["size"], match["need"])
     if winner is not None:
         match["status"] = "won"
         if winner == "x":
@@ -531,7 +572,7 @@ def dz_apply_move(match, user_id, cell):
             match["p2_score"] += 1
         return "win"
 
-    if dz_is_full(match["board"]):
+    if all(c is not None for c in match["board"]):
         match["status"] = "draw"
         return "draw"
 
@@ -542,20 +583,22 @@ def dz_bot_move(match):
     if match["status"] != "playing":
         return "invalid"
 
-    cell = dz_bot_choose(match["board"])
+    cell = dz_bot_choose(
+        match["board"], match["size"], match["need"], match["smart"]
+    )
     if cell is None:
         return "invalid"
 
     match["board"][cell] = "o"
 
-    winner = dz_check_winner(match["board"])
+    winner = dz_check_winner(match["board"], match["size"], match["need"])
     if winner is not None:
         match["status"] = "won"
         match["winner"] = "bot"
         match["p2_score"] += 1
         return "win"
 
-    if dz_is_full(match["board"]):
+    if all(c is not None for c in match["board"]):
         match["status"] = "draw"
         return "draw"
 
@@ -564,12 +607,20 @@ def dz_bot_move(match):
 
 def dz_build_text(match):
     vs_label = "با ربات" if match["vs"] == "bot" else "با کاربر"
+    size = match["size"]
+    diff_label = DZ_DIFFICULTIES.get(match.get("difficulty", ""), {}).get("label", "")
+
+    if diff_label:
+        header = f"دوز | {diff_label} ({size}x{size}) | {vs_label}"
+    else:
+        header = f"دوز | {size}x{size} | {vs_label}"
+
     p1 = match["player1_name"]
     p2 = match["player2_name"] or "—"
     status = match["status"]
 
     lines = [
-        f"دوز | {vs_label}",
+        header,
         "",
         f"👤 {p1} {DZ_SYM_X}: {match['p1_score']}",
         f"👤 {p2} {DZ_SYM_O}: {match['p2_score']}",
@@ -594,14 +645,15 @@ def dz_build_text(match):
 def dz_build_keyboard(match):
     mid = match["match_id"]
     status = match["status"]
+    size = match["size"]
     board = match["board"]
     playing = status == "playing"
 
     rows = []
-    for r in range(3):
+    for r in range(size):
         row = []
-        for c in range(3):
-            idx = r * 3 + c
+        for c in range(size):
+            idx = r * size + c
             cell = board[idx]
             if cell == "x":
                 label = DZ_SYM_X
@@ -1360,6 +1412,46 @@ async def handle_dz_vs(q, vs):
     session["updated_at"] = now_ts()
     await q.answer()
 
+    vs_label = "با ربات" if vs == "bot" else "با کاربر"
+    try:
+        await q.edit_message_text(
+            f"دوز | {vs_label}\n\n"
+            f"اندازه زمین رو انتخاب کن:",
+            reply_markup=dz_diff_kb(vs),
+        )
+    except Exception as e:
+        logging.exception("dz vs edit: %s", e)
+
+
+async def handle_dz_diff(q, vs, level):
+    chat_id = q.message.chat.id
+    user_id = q.from_user.id
+    message_id = q.message.message_id
+    key = (chat_id, user_id)
+    session = sessions.get(key)
+
+    if not session or session["message_id"] != message_id:
+        await q.answer("این بازی برای شما نیست یا منقضی شده.", show_alert=True)
+        return
+
+    if is_expired(session):
+        sessions.pop(key, None)
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    if vs not in ("bot", "user"):
+        await q.answer("مقدار نامعتبر.", show_alert=True)
+        return
+
+    cfg = DZ_DIFFICULTIES.get(level)
+    if not cfg:
+        await q.answer("سطح نامعتبر.", show_alert=True)
+        return
+
+    session["updated_at"] = now_ts()
+    await q.answer()
+
+    size = cfg["size"]
     mid = format(random.randint(0, 0xFFFFFFFF), '08x')
     match = {
         "match_id": mid,
@@ -1371,7 +1463,11 @@ async def handle_dz_vs(q, vs):
         "player2_name": None,
         "vs": vs,
         "turn": user_id,
-        "board": [None] * 9,
+        "difficulty": level,
+        "size": size,
+        "need": cfg["need"],
+        "smart": cfg["smart"],
+        "board": [None] * (size * size),
         "p1_score": 0,
         "p2_score": 0,
         "status": "waiting",
@@ -1393,14 +1489,15 @@ async def handle_dz_vs(q, vs):
                 reply_markup=dz_build_keyboard(match),
             )
         else:
+            diff_label = cfg["label"]
             await q.edit_message_text(
-                f"دوز | با کاربر\n\n"
+                f"دوز | {diff_label} ({size}x{size}) | با کاربر\n\n"
                 f"👤 {session['username']} منتظر حریف است...\n\n"
                 f"هر کسی می‌خواد بازی کنه روی دکمه زیر بزنه:",
                 reply_markup=dz_join_kb(mid),
             )
     except Exception as e:
-        logging.exception("dz vs edit: %s", e)
+        logging.exception("dz diff edit: %s", e)
 
 
 async def handle_dz_join(q, mid):
@@ -1570,7 +1667,8 @@ async def handle_dz_next(q, mid):
         else:
             match["turn"] = match["player1_id"]
 
-    match["board"] = [None] * 9
+    size = match["size"]
+    match["board"] = [None] * (size * size)
     match["status"] = "playing"
     match["winner"] = None
     match["updated_at"] = now_ts()
@@ -1678,6 +1776,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action == "dzvs" and len(parts) >= 2:
             await handle_dz_vs(q, parts[1])
+            return
+
+        if action == "dzd" and len(parts) >= 3:
+            await handle_dz_diff(q, parts[1], parts[2])
             return
 
         if action == "dzj" and len(parts) >= 2:
