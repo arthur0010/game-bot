@@ -26,7 +26,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 SESSION_TIMEOUT = 1800
-MS_TIMEOUT = 10800
+GAME_TIMEOUT = 10800
 RIDDLE_TTL = 86400
 CLEANUP_INTERVAL = 60
 TRIGGER_TEXT = "شروع بازی"
@@ -42,6 +42,7 @@ fb_matches = {}
 fb_index = {}
 riddle_map = {}
 ms_matches = {}
+dz_matches = {}
 
 app_telegram = None
 main_loop = None
@@ -58,13 +59,26 @@ MS_DIFFICULTIES = {
 
 BOT_MS_LABEL = "🤖 ربات"
 
+DZ_SYM_X = "❌"
+DZ_SYM_O = "⭕"
+DZ_EMPTY = "⬜"
+
+DZ_WIN_LINES = (
+    (0, 1, 2), (3, 4, 5), (6, 7, 8),
+    (0, 3, 6), (1, 4, 7), (2, 5, 8),
+    (0, 4, 8), (2, 4, 6),
+)
+
 MAIN_MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("✂️ سنگ کاغذ قیچی", callback_data="menu_rps")],
     [
         InlineKeyboardButton("🏀 بسکتبال", callback_data="menu_bb"),
         InlineKeyboardButton("⚽ فوتبال", callback_data="menu_fb"),
     ],
-    [InlineKeyboardButton("💣 شکار مین", callback_data="menu_ms")],
+    [
+        InlineKeyboardButton("💣 شکار مین", callback_data="menu_ms"),
+        InlineKeyboardButton("دوز", callback_data="menu_dz"),
+    ],
     [InlineKeyboardButton("❌ خروج از بازی", callback_data="menu_exit")],
 ])
 
@@ -104,6 +118,12 @@ FB_THROWS_KB = InlineKeyboardMarkup([
 MS_VS_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("🤖 با ربات", callback_data="msvs|bot")],
     [InlineKeyboardButton("👤 با کاربر", callback_data="msvs|user")],
+    [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back")],
+])
+
+DZ_VS_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🤖 با ربات", callback_data="dzvs|bot")],
+    [InlineKeyboardButton("👤 با کاربر", callback_data="dzvs|user")],
     [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back")],
 ])
 
@@ -168,6 +188,13 @@ def ms_join_kb(mid):
     ])
 
 
+def dz_join_kb(mid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✋ من می‌خوام بازی کنم", callback_data=f"dzj|{mid}")],
+        [InlineKeyboardButton("❌ لغو", callback_data=f"dzc|{mid}")],
+    ])
+
+
 def riddle_start_kb(idx, uid):
     return InlineKeyboardMarkup([
         [
@@ -195,8 +222,8 @@ def is_expired(item):
     return (now_ts() - item["updated_at"]) > SESSION_TIMEOUT
 
 
-def is_ms_expired(item):
-    return (now_ts() - item["updated_at"]) > MS_TIMEOUT
+def is_game_expired(item):
+    return (now_ts() - item["updated_at"]) > GAME_TIMEOUT
 
 
 _TRANS_TABLE = str.maketrans(
@@ -411,6 +438,197 @@ def ms_build_keyboard(match):
     return InlineKeyboardMarkup(rows)
 
 
+def dz_check_winner(board):
+    for a, b, c in DZ_WIN_LINES:
+        if board[a] is not None and board[a] == board[b] == board[c]:
+            return board[a]
+    return None
+
+
+def dz_is_full(board):
+    for cell in board:
+        if cell is None:
+            return False
+    return True
+
+
+def dz_minimax(board, turn, bot_sym, opp_sym, depth):
+    w = dz_check_winner(board)
+    if w == bot_sym:
+        return 10 - depth
+    if w == opp_sym:
+        return depth - 10
+    if dz_is_full(board):
+        return 0
+
+    if turn == bot_sym:
+        best = -1000
+        for i in range(9):
+            if board[i] is None:
+                board[i] = bot_sym
+                score = dz_minimax(board, opp_sym, bot_sym, opp_sym, depth + 1)
+                board[i] = None
+                if score > best:
+                    best = score
+        return best
+    else:
+        best = 1000
+        for i in range(9):
+            if board[i] is None:
+                board[i] = opp_sym
+                score = dz_minimax(board, bot_sym, bot_sym, opp_sym, depth + 1)
+                board[i] = None
+                if score < best:
+                    best = score
+        return best
+
+
+def dz_bot_choose(board):
+    best_score = -1000
+    best_cell = None
+    for i in range(9):
+        if board[i] is None:
+            board[i] = "o"
+            score = dz_minimax(board, "x", "o", "x", 1)
+            board[i] = None
+            if score > best_score:
+                best_score = score
+                best_cell = i
+    return best_cell
+
+
+def dz_turn_name(match):
+    if match["turn"] == match["player1_id"]:
+        return match["player1_name"]
+    return match["player2_name"]
+
+
+def dz_apply_move(match, user_id, cell):
+    if match["status"] != "playing":
+        return "invalid"
+    if cell < 0 or cell > 8:
+        return "invalid"
+    if match["board"][cell] is not None:
+        return "invalid"
+
+    if user_id == match["player1_id"]:
+        sym = "x"
+    elif user_id == match["player2_id"]:
+        sym = "o"
+    else:
+        return "invalid"
+
+    match["board"][cell] = sym
+
+    winner = dz_check_winner(match["board"])
+    if winner is not None:
+        match["status"] = "won"
+        if winner == "x":
+            match["winner"] = match["player1_id"]
+            match["p1_score"] += 1
+        else:
+            match["winner"] = match["player2_id"]
+            match["p2_score"] += 1
+        return "win"
+
+    if dz_is_full(match["board"]):
+        match["status"] = "draw"
+        return "draw"
+
+    return "continue"
+
+
+def dz_bot_move(match):
+    if match["status"] != "playing":
+        return "invalid"
+
+    cell = dz_bot_choose(match["board"])
+    if cell is None:
+        return "invalid"
+
+    match["board"][cell] = "o"
+
+    winner = dz_check_winner(match["board"])
+    if winner is not None:
+        match["status"] = "won"
+        match["winner"] = "bot"
+        match["p2_score"] += 1
+        return "win"
+
+    if dz_is_full(match["board"]):
+        match["status"] = "draw"
+        return "draw"
+
+    return "continue"
+
+
+def dz_build_text(match):
+    vs_label = "با ربات" if match["vs"] == "bot" else "با کاربر"
+    p1 = match["player1_name"]
+    p2 = match["player2_name"] or "—"
+    status = match["status"]
+
+    lines = [
+        f"دوز | {vs_label}",
+        "",
+        f"👤 {p1} {DZ_SYM_X}: {match['p1_score']}",
+        f"👤 {p2} {DZ_SYM_O}: {match['p2_score']}",
+        "",
+    ]
+
+    if status == "waiting":
+        lines.append(f"👤 {p1} منتظر حریف است...")
+    elif status == "playing":
+        lines.append(f"🎯 نوبت: {dz_turn_name(match)}")
+    elif status == "won":
+        if match["winner"] == match["player1_id"]:
+            lines.append(f"🏆 برنده: {p1}")
+        else:
+            lines.append(f"🏆 برنده: {p2}")
+    elif status == "draw":
+        lines.append("🤝 مساوی")
+
+    return "\n".join(lines)
+
+
+def dz_build_keyboard(match):
+    mid = match["match_id"]
+    status = match["status"]
+    board = match["board"]
+    playing = status == "playing"
+
+    rows = []
+    for r in range(3):
+        row = []
+        for c in range(3):
+            idx = r * 3 + c
+            cell = board[idx]
+            if cell == "x":
+                label = DZ_SYM_X
+            elif cell == "o":
+                label = DZ_SYM_O
+            else:
+                label = DZ_EMPTY
+
+            if playing and cell is None:
+                cb = f"dz|x|{mid}|{idx}"
+            else:
+                cb = "dz|noop"
+
+            row.append(InlineKeyboardButton(label, callback_data=cb))
+        rows.append(row)
+
+    if playing:
+        rows.append([InlineKeyboardButton("❌ پایان", callback_data=f"dz|e|{mid}")])
+    else:
+        rows.append([
+            InlineKeyboardButton("🔁 دست بعدی", callback_data=f"dz|next|{mid}"),
+            InlineKeyboardButton("❌ بستن", callback_data=f"dz|e|{mid}"),
+        ])
+
+    return InlineKeyboardMarkup(rows)
+
+
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -595,7 +813,7 @@ async def handle_ball_shot(update, context, emoji, matches_dict, index_dict):
     if not match or match["status"] != "playing":
         return
 
-    if is_expired(match):
+    if is_game_expired(match):
         matches_dict.pop(mid, None)
         index_dict.pop((chat_id, reply_to_id), None)
         return
@@ -943,7 +1161,7 @@ async def handle_ms_diff(q, vs, level):
 
 async def handle_ms_join(q, mid):
     match = ms_matches.get(mid)
-    if not match or is_ms_expired(match):
+    if not match or is_game_expired(match):
         ms_matches.pop(mid, None)
         await q.answer("این بازی منقضی شده.", show_alert=True)
         return
@@ -997,7 +1215,7 @@ async def handle_ms_cancel(q, mid):
 
 async def handle_ms_click(q, mid, r, c):
     match = ms_matches.get(mid)
-    if not match or is_ms_expired(match):
+    if not match or is_game_expired(match):
         ms_matches.pop(mid, None)
         await q.answer("این بازی منقضی شده.", show_alert=True)
         return
@@ -1022,11 +1240,7 @@ async def handle_ms_click(q, mid, r, c):
         await q.answer()
         return
 
-    if result == "mine":
-        await q.answer("💣 مین پیدا کردی!")
-    elif result == "empty":
-        await q.answer("❌ خالی بود")
-    elif result == "end":
+    if result == "end":
         await q.answer("🎉 آخرین مین پیدا شد!")
         try:
             await q.edit_message_text(
@@ -1037,16 +1251,28 @@ async def handle_ms_click(q, mid, r, c):
             logging.exception("ms end edit: %s", e)
         return
 
+    if result == "mine":
+        user_toast = "💣 مین پیدا کردی!"
+    else:
+        user_toast = "❌ خالی بود"
+
     if match["vs"] == "user":
         if user_id == match["player1_id"]:
             match["turn"] = match["player2_id"]
         else:
             match["turn"] = match["player1_id"]
     else:
-        ms_bot_move(match)
+        bot_result = ms_bot_move(match)
         match["turn"] = match["player1_id"]
+        if bot_result == "end":
+            user_toast += " | 🎉 بازی تموم شد!"
+        elif bot_result == "mine":
+            user_toast += " | 💣 ربات مین پیدا کرد"
+        elif bot_result == "empty":
+            user_toast += " | ❌ ربات خالی زد"
 
     match["updated_at"] = now_ts()
+    await q.answer(user_toast)
 
     try:
         await q.edit_message_text(
@@ -1062,6 +1288,8 @@ async def handle_ms_new(q, mid):
     user_id = q.from_user.id
     message_id = q.message.message_id
     key = (chat_id, user_id)
+
+    ms_matches.pop(mid, None)
 
     session = sessions.get(key)
     if not session or session["message_id"] != message_id:
@@ -1099,6 +1327,281 @@ async def handle_ms_end(q, mid):
         return
 
     ms_matches.pop(mid, None)
+    await q.answer()
+    try:
+        await q.edit_message_text(
+            "❌ بازی بسته شد.\nبرای شروع دوباره بنویسید: شروع بازی",
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+
+
+async def handle_dz_vs(q, vs):
+    chat_id = q.message.chat.id
+    user_id = q.from_user.id
+    message_id = q.message.message_id
+    key = (chat_id, user_id)
+    session = sessions.get(key)
+
+    if not session or session["message_id"] != message_id:
+        await q.answer("این بازی برای شما نیست یا منقضی شده.", show_alert=True)
+        return
+
+    if is_expired(session):
+        sessions.pop(key, None)
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    if vs not in ("bot", "user"):
+        await q.answer("مقدار نامعتبر.", show_alert=True)
+        return
+
+    session["updated_at"] = now_ts()
+    await q.answer()
+
+    mid = format(random.randint(0, 0xFFFFFFFF), '08x')
+    match = {
+        "match_id": mid,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "player1_id": user_id,
+        "player1_name": session["username"],
+        "player2_id": None,
+        "player2_name": None,
+        "vs": vs,
+        "turn": user_id,
+        "board": [None] * 9,
+        "p1_score": 0,
+        "p2_score": 0,
+        "status": "waiting",
+        "winner": None,
+        "updated_at": now_ts(),
+    }
+
+    if vs == "bot":
+        match["player2_id"] = "bot"
+        match["player2_name"] = BOT_MS_LABEL
+        match["status"] = "playing"
+
+    dz_matches[mid] = match
+
+    try:
+        if vs == "bot":
+            await q.edit_message_text(
+                dz_build_text(match),
+                reply_markup=dz_build_keyboard(match),
+            )
+        else:
+            await q.edit_message_text(
+                f"دوز | با کاربر\n\n"
+                f"👤 {session['username']} منتظر حریف است...\n\n"
+                f"هر کسی می‌خواد بازی کنه روی دکمه زیر بزنه:",
+                reply_markup=dz_join_kb(mid),
+            )
+    except Exception as e:
+        logging.exception("dz vs edit: %s", e)
+
+
+async def handle_dz_join(q, mid):
+    match = dz_matches.get(mid)
+    if not match or is_game_expired(match):
+        dz_matches.pop(mid, None)
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    if match["status"] != "waiting":
+        await q.answer("بازی قبلاً شروع شده.", show_alert=True)
+        return
+
+    user_id = q.from_user.id
+    if user_id == match["player1_id"]:
+        await q.answer("نمی‌تونی با خودت بازی کنی!", show_alert=True)
+        return
+
+    match["player2_id"] = user_id
+    match["player2_name"] = user_display(q.from_user)
+    match["status"] = "playing"
+    match["turn"] = match["player1_id"]
+    match["updated_at"] = now_ts()
+
+    await q.answer("🎮 وارد بازی شدی!")
+
+    try:
+        await q.edit_message_text(
+            dz_build_text(match),
+            reply_markup=dz_build_keyboard(match),
+        )
+    except Exception as e:
+        logging.exception("dz join edit: %s", e)
+
+
+async def handle_dz_cancel(q, mid):
+    match = dz_matches.get(mid)
+    if not match:
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    if q.from_user.id != match["player1_id"]:
+        await q.answer("فقط سازنده بازی می‌تونه لغو کنه.", show_alert=True)
+        return
+
+    dz_matches.pop(mid, None)
+    await q.answer()
+    try:
+        await q.edit_message_text(
+            "❌ بازی لغو شد.\nبرای شروع دوباره بنویسید: شروع بازی",
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+
+
+async def handle_dz_click(q, mid, cell):
+    match = dz_matches.get(mid)
+    if not match or is_game_expired(match):
+        dz_matches.pop(mid, None)
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    if match["status"] != "playing":
+        await q.answer()
+        return
+
+    user_id = q.from_user.id
+    if user_id != match["player1_id"] and user_id != match["player2_id"]:
+        await q.answer("شما در این بازی نیستید.", show_alert=True)
+        return
+
+    if user_id != match["turn"]:
+        await q.answer(f"نوبت {dz_turn_name(match)} است.", show_alert=True)
+        return
+
+    result = dz_apply_move(match, user_id, cell)
+
+    if result == "invalid":
+        await q.answer()
+        return
+
+    if result == "win":
+        match["updated_at"] = now_ts()
+        await q.answer("🏆 بردی!")
+        try:
+            await q.edit_message_text(
+                dz_build_text(match),
+                reply_markup=dz_build_keyboard(match),
+            )
+        except Exception as e:
+            logging.exception("dz win edit: %s", e)
+        return
+
+    if result == "draw":
+        match["updated_at"] = now_ts()
+        await q.answer("🤝 مساوی!")
+        try:
+            await q.edit_message_text(
+                dz_build_text(match),
+                reply_markup=dz_build_keyboard(match),
+            )
+        except Exception as e:
+            logging.exception("dz draw edit: %s", e)
+        return
+
+    if match["vs"] == "user":
+        if user_id == match["player1_id"]:
+            match["turn"] = match["player2_id"]
+        else:
+            match["turn"] = match["player1_id"]
+        match["updated_at"] = now_ts()
+        await q.answer()
+        try:
+            await q.edit_message_text(
+                dz_build_text(match),
+                reply_markup=dz_build_keyboard(match),
+            )
+        except Exception as e:
+            logging.exception("dz user edit: %s", e)
+        return
+
+    bot_result = dz_bot_move(match)
+    match["turn"] = match["player1_id"]
+    match["updated_at"] = now_ts()
+
+    if bot_result == "win":
+        await q.answer("😅 ربات برد!")
+    elif bot_result == "draw":
+        await q.answer("🤝 مساوی!")
+    else:
+        await q.answer()
+
+    try:
+        await q.edit_message_text(
+            dz_build_text(match),
+            reply_markup=dz_build_keyboard(match),
+        )
+    except Exception as e:
+        logging.exception("dz bot edit: %s", e)
+
+
+async def handle_dz_next(q, mid):
+    match = dz_matches.get(mid)
+    if not match or is_game_expired(match):
+        dz_matches.pop(mid, None)
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    user_id = q.from_user.id
+    if user_id != match["player1_id"] and user_id != match["player2_id"]:
+        await q.answer("شما در این بازی نیستید.", show_alert=True)
+        return
+
+    if match["status"] not in ("won", "draw"):
+        await q.answer()
+        return
+
+    if match["vs"] == "user":
+        if match["turn"] == match["player1_id"]:
+            match["turn"] = match["player2_id"]
+        else:
+            match["turn"] = match["player1_id"]
+    else:
+        if match["turn"] == match["player1_id"]:
+            match["turn"] = "bot"
+        else:
+            match["turn"] = match["player1_id"]
+
+    match["board"] = [None] * 9
+    match["status"] = "playing"
+    match["winner"] = None
+    match["updated_at"] = now_ts()
+
+    if match["vs"] == "bot" and match["turn"] == "bot":
+        dz_bot_move(match)
+        match["turn"] = match["player1_id"]
+
+    await q.answer("🎮 دست بعدی!")
+
+    try:
+        await q.edit_message_text(
+            dz_build_text(match),
+            reply_markup=dz_build_keyboard(match),
+        )
+    except Exception as e:
+        logging.exception("dz next edit: %s", e)
+
+
+async def handle_dz_end(q, mid):
+    match = dz_matches.get(mid)
+    if not match:
+        await q.answer("این بازی منقضی شده.", show_alert=True)
+        return
+
+    user_id = q.from_user.id
+    if user_id != match["player1_id"] and user_id != match["player2_id"]:
+        await q.answer("شما در این بازی نیستید.", show_alert=True)
+        return
+
+    dz_matches.pop(mid, None)
     await q.answer()
     try:
         await q.edit_message_text(
@@ -1173,43 +1676,77 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             return
 
-        if action == "rps_join":
+        if action == "dzvs" and len(parts) >= 2:
+            await handle_dz_vs(q, parts[1])
+            return
+
+        if action == "dzj" and len(parts) >= 2:
+            await handle_dz_join(q, parts[1])
+            return
+
+        if action == "dzc" and len(parts) >= 2:
+            await handle_dz_cancel(q, parts[1])
+            return
+
+        if action == "dz" and len(parts) >= 2:
+            sub = parts[1]
+            if sub == "noop":
+                await q.answer()
+                return
+            if sub == "x" and len(parts) >= 4:
+                try:
+                    cell = int(parts[3])
+                except ValueError:
+                    await q.answer("دکمه نامعتبر.", show_alert=True)
+                    return
+                await handle_dz_click(q, parts[2], cell)
+                return
+            if sub == "next" and len(parts) >= 3:
+                await handle_dz_next(q, parts[2])
+                return
+            if sub == "e" and len(parts) >= 3:
+                await handle_dz_end(q, parts[2])
+                return
+            await q.answer()
+            return
+
+        if action == "rps_join" and len(parts) >= 2:
             await handle_rps_join(q, parts[1])
             return
-        if action == "rps_cancel":
+        if action == "rps_cancel" and len(parts) >= 2:
             await handle_rps_cancel(q, parts[1])
             return
-        if action == "rps_pick":
+        if action == "rps_pick" and len(parts) >= 3:
             await handle_rps_pick(q, parts[2], parts[1])
             return
-        if action == "rps_end":
+        if action == "rps_end" and len(parts) >= 2:
             await handle_rps_end(q, parts[1])
             return
-        if action == "rps_botpick":
+        if action == "rps_botpick" and len(parts) >= 2:
             await handle_botpick(q, parts[1])
             return
-        if action == "bb_throws":
+        if action == "bb_throws" and len(parts) >= 2:
             await handle_bb_throws(q, parts[1])
             return
-        if action == "bb_join":
+        if action == "bb_join" and len(parts) >= 2:
             await handle_bb_join(q, parts[1])
             return
-        if action == "bb_cancel":
+        if action == "bb_cancel" and len(parts) >= 2:
             await handle_bb_cancel(q, parts[1])
             return
-        if action == "bb_end":
+        if action == "bb_end" and len(parts) >= 2:
             await handle_bb_end(q, parts[1])
             return
-        if action == "fb_throws":
+        if action == "fb_throws" and len(parts) >= 2:
             await handle_fb_throws(q, parts[1])
             return
-        if action == "fb_join":
+        if action == "fb_join" and len(parts) >= 2:
             await handle_fb_join(q, parts[1])
             return
-        if action == "fb_cancel":
+        if action == "fb_cancel" and len(parts) >= 2:
             await handle_fb_cancel(q, parts[1])
             return
-        if action == "fb_end":
+        if action == "fb_end" and len(parts) >= 2:
             await handle_fb_end(q, parts[1])
             return
 
@@ -1369,7 +1906,7 @@ async def handle_fb_throws(q, throws_str):
 
 async def handle_bb_join(q, mid):
     match = bb_matches.get(mid)
-    if not match or is_expired(match):
+    if not match or is_game_expired(match):
         bb_matches.pop(mid, None)
         bb_index.pop((q.message.chat.id, q.message.message_id), None)
         await q.answer("این بازی منقضی شده.", show_alert=True)
@@ -1402,7 +1939,7 @@ async def handle_bb_join(q, mid):
 
 async def handle_fb_join(q, mid):
     match = fb_matches.get(mid)
-    if not match or is_expired(match):
+    if not match or is_game_expired(match):
         fb_matches.pop(mid, None)
         fb_index.pop((q.message.chat.id, q.message.message_id), None)
         await q.answer("این بازی منقضی شده.", show_alert=True)
@@ -1609,6 +2146,13 @@ async def handle_session_callback(q, chat_id, user_id, message_id, data):
             reply_markup=MS_VS_KB,
         )
 
+    elif data == "menu_dz":
+        await q.edit_message_text(
+            "دوز\n\n"
+            "با کی می‌خوای بازی کنی؟",
+            reply_markup=DZ_VS_KB,
+        )
+
     elif data == "menu_back":
         await q.edit_message_text(
             f"🎮 سلام {session['username']}!\n\nیک گزینه انتخاب کنید:",
@@ -1688,7 +2232,7 @@ async def play_with_bot(q, session, choice):
 
 async def handle_rps_join(q, mid):
     match = matches.get(mid)
-    if not match or is_expired(match):
+    if not match or is_game_expired(match):
         matches.pop(mid, None)
         await q.answer("این بازی منقضی شده.", show_alert=True)
         return
@@ -1741,7 +2285,7 @@ async def handle_rps_cancel(q, mid):
 
 async def handle_rps_pick(q, mid, choice):
     match = matches.get(mid)
-    if not match or is_expired(match):
+    if not match or is_game_expired(match):
         matches.pop(mid, None)
         await q.answer("این بازی منقضی شده.", show_alert=True)
         return
@@ -1870,7 +2414,7 @@ async def cleanup_task():
                 except Exception:
                     pass
 
-            for mid in [m for m, x in matches.items() if is_expired(x)]:
+            for mid in [m for m, x in matches.items() if is_game_expired(x)]:
                 match = matches.pop(mid, None)
                 if not match:
                     continue
@@ -1885,7 +2429,7 @@ async def cleanup_task():
                 except Exception:
                     pass
 
-            for mid in [m for m, x in bb_matches.items() if is_expired(x)]:
+            for mid in [m for m, x in bb_matches.items() if is_game_expired(x)]:
                 match = bb_matches.pop(mid, None)
                 if not match:
                     continue
@@ -1901,7 +2445,7 @@ async def cleanup_task():
                 except Exception:
                     pass
 
-            for mid in [m for m, x in fb_matches.items() if is_expired(x)]:
+            for mid in [m for m, x in fb_matches.items() if is_game_expired(x)]:
                 match = fb_matches.pop(mid, None)
                 if not match:
                     continue
@@ -1917,7 +2461,7 @@ async def cleanup_task():
                 except Exception:
                     pass
 
-            for mid in [m for m, x in ms_matches.items() if is_ms_expired(x)]:
+            for mid in [m for m, x in ms_matches.items() if is_game_expired(x)]:
                 match = ms_matches.pop(mid, None)
                 if not match:
                     continue
@@ -1926,6 +2470,21 @@ async def cleanup_task():
                         chat_id=match["chat_id"],
                         message_id=match["message_id"],
                         text="⏰ بازی شکار مین به دلیل عدم فعالیت بسته شد.\n"
+                             "برای شروع دوباره بنویسید: شروع بازی",
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+
+            for mid in [m for m, x in dz_matches.items() if is_game_expired(x)]:
+                match = dz_matches.pop(mid, None)
+                if not match:
+                    continue
+                try:
+                    await app_telegram.bot.edit_message_text(
+                        chat_id=match["chat_id"],
+                        message_id=match["message_id"],
+                        text="⏰ بازی دوز به دلیل عدم فعالیت بسته شد.\n"
                              "برای شروع دوباره بنویسید: شروع بازی",
                         reply_markup=None,
                     )
