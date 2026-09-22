@@ -51,7 +51,7 @@ CALL_TEXTS = frozenset([
     "گیم چی",
 ])
 
-CALL_RESPONSES = [
+CALL_RESPONSES = (
     "جانم",
     "جانم زیبا",
     "بله",
@@ -64,7 +64,7 @@ CALL_RESPONSES = [
     "جانم عشق",
     "بله عزیزم",
     "جانم عزیزم",
-]
+)
 
 HELP_TEXTS = frozenset([
     "راهنما",
@@ -73,8 +73,7 @@ HELP_TEXTS = frozenset([
 ])
 
 HELP_TEXT = (
-    "🎮 راهنمای ربات گیمچی\n"
-    "━━━━━━━━━━━━━━\n\n"
+    "🎮 راهنمای ربات گیمچی | gamechi\n\n"
     "🔸 برای شروع بازی یکی از این‌ها رو بنویس:\n"
     "شروع بازی / شروع / بازی / سرگرمی\n\n"
     "🔸 برای دریافت چیستان بنویس:\n"
@@ -302,6 +301,10 @@ def normalize(text):
     return text.translate(_TRANS_TABLE).translate(_DROP_TABLE).lower()
 
 
+CALL_TEXTS_NORMALIZED = frozenset(normalize(t) for t in CALL_TEXTS)
+HELP_TEXTS_NORMALIZED = frozenset(normalize(t) for t in HELP_TEXTS)
+
+
 def is_trigger(text):
     if not text:
         return False
@@ -318,10 +321,6 @@ def is_help(text):
     if not text:
         return False
     return normalize(text) in HELP_TEXTS_NORMALIZED
-
-
-CALL_TEXTS_NORMALIZED = frozenset([normalize(t) for t in CALL_TEXTS])
-HELP_TEXTS_NORMALIZED = frozenset([normalize(t) for t in HELP_TEXTS])
 
 
 def throws_display(throws, goal_char="🎯"):
