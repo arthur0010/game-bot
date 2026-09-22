@@ -29,10 +29,63 @@ SESSION_TIMEOUT = 1800
 GAME_TIMEOUT = 10800
 RIDDLE_TTL = 86400
 CLEANUP_INTERVAL = 60
-TRIGGER_TEXT = "شروع بازی"
 RIDDLE_TRIGGER = "چیستان"
 BASKETBALL_EMOJI = "🏀"
 FOOTBALL_EMOJI = "⚽"
+
+TRIGGER_TEXTS = frozenset([
+    "شروع بازی",
+    "شروع",
+    "سرگرمی",
+    "بازی",
+    "start",
+    "game",
+    "start game",
+])
+
+CALL_TEXTS = frozenset([
+    "ربات",
+    "بات",
+    "گیم‌چی",
+    "گیمچی",
+    "گیم چی",
+])
+
+CALL_RESPONSES = [
+    "جانم",
+    "جانم زیبا",
+    "بله",
+    "جان",
+    "چیه",
+    "بگو",
+    "بفرما",
+    "بفرمایید",
+    "جان دلم",
+    "جانم عشق",
+    "بله عزیزم",
+    "جانم عزیزم",
+]
+
+HELP_TEXTS = frozenset([
+    "راهنما",
+    "راهنمایی",
+    "help",
+])
+
+HELP_TEXT = (
+    "🎮 راهنمای ربات گیمچی\n"
+    "━━━━━━━━━━━━━━\n\n"
+    "🔸 برای شروع بازی یکی از این‌ها رو بنویس:\n"
+    "شروع بازی / شروع / بازی / سرگرمی\n\n"
+    "🔸 برای دریافت چیستان بنویس:\n"
+    "چیستان\n\n"
+    "🎲 بازی‌های موجود:\n"
+    "• سنگ کاغذ قیچی\n"
+    "• بسکتبال\n"
+    "• فوتبال\n"
+    "• شکار مین\n"
+    "• دوز"
+)
 
 sessions = {}
 matches = {}
@@ -247,6 +300,28 @@ def normalize(text):
     if not text:
         return ""
     return text.translate(_TRANS_TABLE).translate(_DROP_TABLE).lower()
+
+
+def is_trigger(text):
+    if not text:
+        return False
+    return text.strip().lower() in TRIGGER_TEXTS
+
+
+def is_call(text):
+    if not text:
+        return False
+    return normalize(text) in CALL_TEXTS_NORMALIZED
+
+
+def is_help(text):
+    if not text:
+        return False
+    return normalize(text) in HELP_TEXTS_NORMALIZED
+
+
+CALL_TEXTS_NORMALIZED = frozenset([normalize(t) for t in CALL_TEXTS])
+HELP_TEXTS_NORMALIZED = frozenset([normalize(t) for t in HELP_TEXTS])
 
 
 def throws_display(throws, goal_char="🎯"):
@@ -695,10 +770,39 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎮 سلام!\n\n"
         "من یک ربات بازی و سرگرمی برای گروه‌ها هستم.\n\n"
-        "من رو به گروهت اضافه کن و اونجا بنویس:\n"
-        "شروع بازی",
+        "من رو به گروهت اضافه کن و سرگرم شو!",
         reply_markup=kb,
     )
+
+
+async def on_call(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    chat_type = update.effective_chat.type
+    if chat_type != "group" and chat_type != "supergroup":
+        return
+    if not is_call(msg.text):
+        return
+    try:
+        await msg.reply_text(random.choice(CALL_RESPONSES))
+    except Exception as e:
+        logging.exception("call reply error: %s", e)
+
+
+async def on_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    chat_type = update.effective_chat.type
+    if chat_type != "group" and chat_type != "supergroup":
+        return
+    if not is_help(msg.text):
+        return
+    try:
+        await msg.reply_text(HELP_TEXT)
+    except Exception as e:
+        logging.exception("help reply error: %s", e)
 
 
 async def on_riddle_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -783,7 +887,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_type = update.effective_chat.type
     if chat_type != "group" and chat_type != "supergroup":
         return
-    if msg.text.strip() != TRIGGER_TEXT:
+    if not is_trigger(msg.text):
         return
 
     chat_id = update.effective_chat.id
@@ -2716,7 +2820,21 @@ async def main_async():
         on_riddle_request
     ))
     app_telegram.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\s*شروع بازی\s*$'),
+        filters.TEXT & ~filters.COMMAND & filters.Regex(
+            r'(?i)^\s*(راهنما|راهنمایی|help)\s*$'
+        ),
+        on_help
+    ))
+    app_telegram.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(
+            r'^\s*(ربات|بات|گیم[\s\u200c]?چی)\s*$'
+        ),
+        on_call
+    ))
+    app_telegram.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(
+            r'(?i)^\s*(شروع بازی|start game|شروع|سرگرمی|بازی|start|game)\s*$'
+        ),
         on_group_message
     ))
     app_telegram.add_handler(MessageHandler(bb_shot_filter, on_basketball_shot))
